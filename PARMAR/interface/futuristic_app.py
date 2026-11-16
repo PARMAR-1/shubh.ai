@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import ssl
+from copy import deepcopy
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +28,25 @@ from PARMAR.conversations import (
     MessageRepository,
     SQLiteConversationRepository,
 )
-from PARMAR.identity import HTTPRequestContext, LocalDemoPrincipalResolver, Principal, PrincipalResolver
+from PARMAR.identity import (
+    HTTPRequestContext,
+    LocalDemoPrincipalResolver,
+    Principal,
+    PrincipalResolver,
+    TRUSTED_IDENTITY_SOURCE,
+)
+from PARMAR.identity_contracts import (
+    ActionApprovalBinding,
+    AuthenticatedPrincipal,
+    AuthorizationContext,
+    ProfileIdentity,
+    ResourceAction,
+    ResourceDescriptor,
+    ResourcePermission,
+    ResourceScope,
+    authentication_is_current,
+    authorize_resource_action,
+)
 from PARMAR.identity_store import (
     IdentityAccessDenied,
     IdentityStorageUnavailable,
@@ -67,6 +86,11 @@ from PARMAR.sessions import (
     clear_session_cookie_header,
     session_cookie_header,
     session_manager_from_environment,
+)
+from PARMAR.safety.runtime_no_go import (
+    RuntimeNoGo,
+    UnfencedOperation,
+    require_atomic_authorization_fence,
 )
 from PARMAR.simulation.scenarios import get_scenarios
 from PARMAR.simulation.simulator import evaluate_scenario
@@ -407,6 +431,207 @@ def _development_login_origin_is_valid(request: object) -> bool:
     )
 
 
+def _has_trusted_account_context(context: object) -> bool:
+    if not isinstance(context, HTTPRequestContext):
+        return False
+    principal = context.principal
+    authenticated = context.authenticated_principal
+    return (
+        principal.authenticated
+        and context.session_id is not None
+        and principal.authentication_source == TRUSTED_IDENTITY_SOURCE
+        and isinstance(authenticated, AuthenticatedPrincipal)
+        and principal.account_identity == authenticated.account_identity
+        and principal.user_id == authenticated.account_identity.value
+        and authentication_is_current(authenticated.authentication)
+    )
+
+
+class ExecutionAuthorizationUnavailable(RuntimeError):
+    """Raised when an execution-boundary authorization check cannot complete."""
+
+
+def _deny_unfenced_protected_operation(request: object, operation: UnfencedOperation) -> bool:
+    try:
+        require_atomic_authorization_fence(operation)
+    except RuntimeNoGo as error:
+        request.send_error(503, str(error))
+        return True
+    return False
+
+
+def _revalidate_trusted_request_context(
+    request: object,
+    original_context: object,
+    *,
+    require_active_profile: bool = False,
+) -> HTTPRequestContext | None:
+    if (
+        SESSION_MANAGER is None
+        or not isinstance(original_context, HTTPRequestContext)
+        or not _has_trusted_account_context(original_context)
+    ):
+        return None
+    expected_principal = original_context.authenticated_principal
+    if expected_principal is None:
+        return None
+    session = SESSION_MANAGER.resolve_trusted_session(
+        _read_session_cookie(request),
+        expected_session_id=original_context.session_id,
+        expected_account_identity=expected_principal.account_identity,
+        expected_evidence_id=expected_principal.authentication.evidence_id,
+    )
+    if session is None:
+        return None
+    if require_active_profile and session.active_profile_id != original_context.active_profile_id:
+        return None
+    fresh_principal = Principal.authenticated_user(
+        session.user_id,
+        session.authentication_source,
+        account_identity=session.account_identity,
+    )
+    fresh_authenticated_principal = AuthenticatedPrincipal(
+        session.account_identity,
+        session.authentication_context,
+    )
+    fresh_context = HTTPRequestContext(
+        fresh_principal,
+        session.session_id,
+        session.active_profile_id,
+        fresh_authenticated_principal,
+    )
+    if require_active_profile:
+        if fresh_context.active_profile_id is None:
+            return None
+        profile = IDENTITY_REPOSITORY.get_owned_profile(
+            fresh_context.principal.user_id,
+            fresh_context.active_profile_id,
+        )
+        if profile is None:
+            return None
+        account_identity = fresh_context.authenticated_principal.account_identity
+        profile_identity = ProfileIdentity(fresh_context.active_profile_id)
+        authorization = authorize_resource_action(
+            AuthorizationContext(
+                fresh_context.authenticated_principal,
+                active_profile_id=profile_identity,
+                active_profile_owner_account_identity=account_identity,
+            ),
+            ResourceDescriptor(
+                fresh_context.active_profile_id,
+                account_identity,
+                ResourceScope.PERSONAL,
+                profile_id=profile_identity,
+            ),
+            ResourceAction.EDIT,
+            ResourcePermission.EDIT,
+        )
+        if authorization.allowed is not True:
+            return None
+    request.request_context = fresh_context
+    return fresh_context
+
+
+def _execution_authorization_check(
+    request: object,
+    original_context: HTTPRequestContext,
+    *,
+    approval_id: object = None,
+    approval_binding: object = None,
+    decision_id: str | None = None,
+    execution_context: dict | None = None,
+    require_active_profile: bool = False,
+) -> bool:
+    try:
+        context = _revalidate_trusted_request_context(
+            request,
+            original_context,
+            require_active_profile=require_active_profile,
+        )
+        if context is None:
+            return False
+        conversation_id = (
+            execution_context.get("conversation_id")
+            if isinstance(execution_context, dict)
+            else None
+        )
+        if conversation_id is not None:
+            try:
+                parsed_conversation_id = UUID(conversation_id)
+            except (TypeError, ValueError):
+                return False
+            if context.active_profile_id is None or CONVERSATION_REPOSITORY.get_owned(
+                parsed_conversation_id,
+                context.principal.user_id,
+                context.active_profile_id,
+            ) is None:
+                return False
+        if approval_id is None:
+            return True
+        if (
+            decision_id is None
+            or type(approval_binding) is not ActionApprovalBinding
+            or approval_binding.actor_id != context.principal.user_id
+            or approval_binding.action != "chat.respond"
+            or approval_binding.permission_scope != "parmar:chat:respond"
+        ):
+            return False
+        expected_binding = approval_binding_for_pending(
+            context.principal.user_id,
+            decision_id,
+            execution_context,
+        )
+        if expected_binding != approval_binding:
+            return False
+        profile_id = (
+            execution_context.get("profile_id")
+            if isinstance(execution_context, dict)
+            else None
+        )
+        if (
+            not require_active_profile
+            or context.active_profile_id is None
+            or profile_id != str(context.active_profile_id)
+        ):
+            return False
+        return PENDING_APPROVALS.authorize_execution(
+            approval_id,
+            user_id=context.principal.user_id,
+            session_id=context.session_id,
+            approval_binding=approval_binding,
+        )
+    except (
+        ApprovalStorageUnavailable,
+        ConversationStorageUnavailable,
+        IdentityStorageUnavailable,
+        SessionStorageUnavailable,
+    ) as error:
+        raise ExecutionAuthorizationUnavailable(
+            "Execution authorization is unavailable."
+        ) from error
+
+
+def _revalidate_before_side_effect(
+    request: object,
+    original_context: object,
+    *,
+    require_active_profile: bool = False,
+) -> HTTPRequestContext | None:
+    try:
+        context = _revalidate_trusted_request_context(
+            request,
+            original_context,
+            require_active_profile=require_active_profile,
+        )
+    except (IdentityStorageUnavailable, SessionStorageUnavailable):
+        request.send_error(503, "Execution authorization is unavailable")
+        return None
+    if context is None:
+        request.send_error(401, "A valid trusted session is required")
+        return None
+    return context
+
+
 def _create_pending_approval(
     request: object,
     request_text: str,
@@ -423,10 +648,7 @@ def _create_pending_approval(
         or summary is None
         or response.get("status") != "APPROVAL_REQUIRED"
         or summary.get("enforcement", {}).get("status") != "HUMAN_APPROVAL_REQUIRED"
-        or context is None
-        or not context.principal.authenticated
-        or context.principal.user_id is None
-        or context.session_id is None
+        or not _has_trusted_account_context(context)
     ):
         attach_voki_contract(
             response,
@@ -439,6 +661,18 @@ def _create_pending_approval(
 
     if not _require_owned_active_profile(request, context):
         request._approval_profile_unavailable = True
+        return False
+    try:
+        context = _revalidate_trusted_request_context(
+            request,
+            context,
+            require_active_profile=True,
+        )
+    except (IdentityStorageUnavailable, SessionStorageUnavailable):
+        request.send_error(503, "Execution authorization is unavailable")
+        return False
+    if context is None:
+        request.send_error(401, "A valid trusted session is required")
         return False
 
     decision_id = summary.get("enforcement", {}).get("decision_id")
@@ -507,8 +741,22 @@ _CLIENT_IDENTITY_FIELDS = frozenset({
     "principal",
     "principal_id",
     "principalid",
+    "authenticated_principal",
+    "authenticatedprincipal",
     "authenticated_user_id",
     "authenticateduserid",
+    "actor_id",
+    "actorid",
+    "actor_identity",
+    "actoridentity",
+    "actor_user_id",
+    "actoruserid",
+    "account_identity",
+    "accountidentity",
+    "canonical_account_id",
+    "email",
+    "email_address",
+    "emailaddress",
 })
 _CLIENT_IDENTITY_HEADERS = frozenset({
     "authorization",
@@ -521,6 +769,8 @@ _CLIENT_IDENTITY_HEADERS = frozenset({
     "x-remote-user",
     "x-user",
     "x-owner",
+    "x-actor",
+    "x-actor-id",
     "x-parmar-account-id",
     "x-session",
     "x-principal",
@@ -530,6 +780,7 @@ _CLIENT_IDENTITY_HEADER_PREFIXES = (
     "x-account-id",
     "x-user-id",
     "x-owner-id",
+    "x-actor-id",
     "x-parmar-account-id",
     "x-session-id",
     "x-principal-id",
@@ -614,11 +865,25 @@ def _resolve_request_context(request: object) -> bool:
             request.send_error(503, "Authenticated session storage is unavailable")
             return False
         if session is not None:
-            principal = Principal.authenticated_user(session.user_id, session.authentication_source)
+            authenticated_principal = None
+            if session.account_identity is not None:
+                if session.authentication_context is None:
+                    request.send_error(503, "Authenticated session storage is unavailable")
+                    return False
+                authenticated_principal = AuthenticatedPrincipal(
+                    session.account_identity,
+                    session.authentication_context,
+                )
+            principal = Principal.authenticated_user(
+                session.user_id,
+                session.authentication_source,
+                account_identity=session.account_identity,
+            )
             request.request_context = HTTPRequestContext(
                 principal,
                 session.session_id,
                 session.active_profile_id,
+                authenticated_principal,
             )
             return True
     try:
@@ -717,11 +982,10 @@ def _identity_storage_error(request: object) -> None:
 
 
 def _require_owned_active_profile(request: object, context: HTTPRequestContext) -> bool:
-    if (
-        not context.principal.authenticated
-        or context.principal.user_id is None
-        or context.active_profile_id is None
-    ):
+    if not _has_trusted_account_context(context):
+        request.send_error(401, "A trusted authenticated account session is required")
+        return False
+    if context.active_profile_id is None:
         request.send_error(409, "An active profile is required")
         return False
     try:
@@ -947,7 +1211,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/api/identity/profiles", "/api/identity/workspaces"}:
             context = self.request_context
-            if not context.principal.authenticated or context.principal.user_id is None:
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             try:
@@ -964,7 +1228,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/identity/workspaces/") and parsed.path.endswith("/profiles"):
             context = self.request_context
-            if not context.principal.authenticated or context.principal.user_id is None:
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             parts = parsed.path.strip("/").split("/")
@@ -999,11 +1263,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/conversations":
             context = self.request_context
-            if (
-                not context.principal.authenticated
-                or context.principal.user_id is None
-                or context.session_id is None
-            ):
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             if not _require_owned_active_profile(self, context):
@@ -1025,11 +1285,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/conversations/"):
             context = self.request_context
-            if (
-                not context.principal.authenticated
-                or context.principal.user_id is None
-                or context.session_id is None
-            ):
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             if not _require_owned_active_profile(self, context):
@@ -1089,7 +1345,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/memory":
             context = self.request_context
-            if not context.principal.authenticated or context.principal.user_id is None:
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             try:
@@ -1260,12 +1516,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/session/profile":
             context = self.request_context
-            if (
-                not context.principal.authenticated
-                or context.principal.user_id is None
-                or context.session_id is None
-                or SESSION_MANAGER is None
-            ):
+            if not _has_trusted_account_context(context) or SESSION_MANAGER is None:
                 self.send_error(401, "An authenticated session is required")
                 return
             if set(payload) != {"profile_id"} or not isinstance(payload["profile_id"], str):
@@ -1275,6 +1526,14 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 profile_id = UUID(payload["profile_id"])
             except ValueError:
                 self.send_error(404, "Profile not found")
+                return
+            context = _revalidate_before_side_effect(self, context)
+            if context is None:
+                return
+            if _deny_unfenced_protected_operation(
+                self,
+                UnfencedOperation.SESSION_PROFILE_SELECTION,
+            ):
                 return
             try:
                 profile = IDENTITY_REPOSITORY.get_owned_profile(
@@ -1302,6 +1561,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 context.principal,
                 context.session_id,
                 selected_session.active_profile_id,
+                context.authenticated_principal,
             )
             _send_json_with_headers(
                 self,
@@ -1313,11 +1573,19 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {"/api/identity/profiles", "/api/identity/workspaces"}:
             context = self.request_context
-            if not context.principal.authenticated or context.principal.user_id is None:
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             if set(payload) != {"name"}:
                 self.send_error(400, "Only a resource name is accepted")
+                return
+            context = _revalidate_before_side_effect(self, context)
+            if context is None:
+                return
+            if _deny_unfenced_protected_operation(
+                self,
+                UnfencedOperation.PROFILE_WORKSPACE_WRITE,
+            ):
                 return
             try:
                 if parsed.path == "/api/identity/profiles":
@@ -1348,7 +1616,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/api/identity/workspaces/"):
             context = self.request_context
-            if not context.principal.authenticated or context.principal.user_id is None:
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             parts = parsed.path.strip("/").split("/")
@@ -1369,6 +1637,14 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 profile_id = UUID(parts[5])
             except ValueError:
                 self.send_error(404, "Workspace or profile not found")
+                return
+            context = _revalidate_before_side_effect(self, context)
+            if context is None:
+                return
+            if _deny_unfenced_protected_operation(
+                self,
+                UnfencedOperation.PROFILE_WORKSPACE_WRITE,
+            ):
                 return
             try:
                 IDENTITY_REPOSITORY.add_profile_to_workspace(
@@ -1392,7 +1668,7 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/memory":
             context = self.request_context
-            if not context.principal.authenticated or context.principal.user_id is None:
+            if not _has_trusted_account_context(context):
                 self.send_error(401, "An authenticated session is required")
                 return
             user_id = context.principal.user_id
@@ -1409,6 +1685,14 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 return
             if set(payload) - allowed_fields[action]:
                 self.send_error(400, "Unsupported memory fields")
+                return
+            context = _revalidate_before_side_effect(self, context)
+            if context is None:
+                return
+            if _deny_unfenced_protected_operation(
+                self,
+                UnfencedOperation.PROTECTED_MEMORY_MUTATION,
+            ):
                 return
             if action == "consent":
                 granted = payload.get("granted")
@@ -1576,13 +1860,60 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/api/approval/cancel":
+            context = self.request_context
+            if not _has_trusted_account_context(context):
+                self._send_json(403, {
+                    "status": "APPROVAL_INVALID",
+                    "safe": False,
+                    "message": "An authenticated session that owns this review is required.",
+                })
+                return
+            approval_id = payload.get("approval_id")
+            reason_code = payload.get("reason_code")
+            if not isinstance(reason_code, str):
+                self.send_error(400, "A cancellation reason code is required")
+                return
+            reason_code = reason_code.strip().upper()
+            if reason_code not in {
+                "USER_REQUEST",
+                "AUTHORIZATION_WITHDRAWN",
+                "CONTEXT_CHANGED",
+                "OTHER",
+            }:
+                self.send_error(400, "Unsupported cancellation reason code")
+                return
+            context = _revalidate_before_side_effect(self, context)
+            if context is None:
+                return
+            try:
+                state = PENDING_APPROVALS.cancel(
+                    approval_id,
+                    user_id=context.principal.user_id,
+                    session_id=context.session_id,
+                    reason_code=reason_code,
+                )
+            except ApprovalStorageUnavailable:
+                self.send_error(503, "Pending approval storage is unavailable")
+                return
+            if state not in {"CANCELLED", "ALREADY_CANCELLED"}:
+                self._send_json(410, {
+                    "status": "APPROVAL_INVALID",
+                    "safe": False,
+                    "message": "The pending approval is unavailable.",
+                })
+                return
+            self._send_json(200, {
+                "status": "CANCELLED",
+                "safe": True,
+                "idempotent": state == "ALREADY_CANCELLED",
+                "message": "The pending approval was cancelled.",
+            })
+            return
+
         if parsed.path == "/api/approval":
             context = self.request_context
-            if (
-                not context.principal.authenticated
-                or context.principal.user_id is None
-                or context.session_id is None
-            ):
+            if not _has_trusted_account_context(context):
                 self._send_json(403, {
                     "status": "APPROVAL_INVALID",
                     "safe": False,
@@ -1664,15 +1995,44 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(200, result)
                 return
-            try:
-                pending, state = PENDING_APPROVALS.consume(
-                    approval_id,
-                    user_id=context.principal.user_id,
-                    session_id=context.session_id,
-                    request_text=request_text.strip() if request_text is not None else None,
-                    decision=decision,
-                    approval_binding=expected_binding,
+            if (
+                decision in {"APPROVE", "APPROVED"}
+                and pending.execution_context is not None
+                and _deny_unfenced_protected_operation(
+                    self,
+                    UnfencedOperation.APPROVED_CHAT_CONTINUATION,
                 )
+            ):
+                return
+            context = _revalidate_before_side_effect(
+                self,
+                context,
+                require_active_profile=True,
+            )
+            if context is None:
+                return
+            reserve_for_execution = (
+                decision in {"APPROVE", "APPROVED"}
+                and pending.execution_context is not None
+            )
+            try:
+                if reserve_for_execution:
+                    pending, state = PENDING_APPROVALS.approve_for_execution(
+                        approval_id,
+                        user_id=context.principal.user_id,
+                        session_id=context.session_id,
+                        request_text=request_text.strip() if request_text is not None else None,
+                        approval_binding=expected_binding,
+                    )
+                else:
+                    pending, state = PENDING_APPROVALS.consume(
+                        approval_id,
+                        user_id=context.principal.user_id,
+                        session_id=context.session_id,
+                        request_text=request_text.strip() if request_text is not None else None,
+                        decision=decision,
+                        approval_binding=expected_binding,
+                    )
             except ApprovalStorageUnavailable:
                 self.send_error(503, "Pending approval storage is unavailable")
                 return
@@ -1684,38 +2044,92 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                     "message": "The pending approval is missing, expired, mismatched, or already used.",
                 })
                 return
+            approved_summary = deepcopy(pending.summary)
             result = PARMARUIAdapter.apply_pending_human_decision(
                 pending.response.copy(),
                 pending.dashboard,
-                pending.summary,
+                approved_summary,
                 decision,
             )
             result.pop("approval_id", None)
-            if (
-                decision in {"APPROVE", "APPROVED"}
-                and pending.execution_context is not None
+            will_execute = (
+                reserve_for_execution
                 and result.get("enforcement", {}).get("status") == "READY_FOR_ACTION"
                 and result.get("enforcement", {}).get("execution_allowed") is True
                 and result.get("action_boundary", {}).get("status") == "ACTION_BOUNDARY_OK"
                 and result.get("action_boundary", {}).get("execution_allowed") is True
-            ):
+            )
+            if reserve_for_execution and not will_execute:
+                context = _revalidate_before_side_effect(
+                    self,
+                    context,
+                    require_active_profile=True,
+                )
+                if context is None:
+                    return
+                try:
+                    state = PENDING_APPROVALS.cancel(
+                        approval_id,
+                        user_id=context.principal.user_id,
+                        session_id=context.session_id,
+                        reason_code="AUTHORIZATION_WITHDRAWN",
+                        approval_binding=expected_binding,
+                    )
+                except ApprovalStorageUnavailable:
+                    self.send_error(503, "Pending approval storage is unavailable")
+                    return
+                if state not in {"CANCELLED", "ALREADY_CANCELLED"}:
+                    self.send_error(409, "Pending approval could not be finalized")
+                    return
+            if will_execute:
                 execution = pending.execution_context
                 service = ChatService(external_authorization=EXTERNAL_AUTHORIZATION)
-                result = service.respond_approved(
-                    pending.request_text,
-                    approved_response=result,
-                    dashboard=pending.dashboard,
-                    summary=pending.summary,
-                    context=execution["context"],
-                    selected_provider=execution.get("selected_provider"),
-                    orchestration_mode=execution["orchestration_mode"],
-                    recent_messages=execution.get("recent_messages"),
-                    research=execution.get("research", False),
-                    memory_retriever=lambda: _retrieve_owned_memory_context(
-                        context.principal.user_id,
-                        pending.request_text,
-                    ),
+                execution_check = lambda: _execution_authorization_check(
+                    self,
+                    context,
+                    approval_id=approval_id,
+                    approval_binding=expected_binding,
+                    decision_id=pending.decision_id,
+                    execution_context=execution,
+                    require_active_profile=True,
                 )
+                current_context_check = lambda: _execution_authorization_check(
+                    self,
+                    context,
+                    execution_context=execution,
+                    require_active_profile=True,
+                )
+                try:
+                    result = service.respond_approved(
+                        pending.request_text,
+                        approved_response=result,
+                        dashboard=pending.dashboard,
+                        summary=approved_summary,
+                        context=execution["context"],
+                        selected_provider=execution.get("selected_provider"),
+                        orchestration_mode=execution["orchestration_mode"],
+                        recent_messages=execution.get("recent_messages"),
+                        research=execution.get("research", False),
+                        memory_retriever=lambda: _retrieve_owned_memory_context(
+                            context.principal.user_id,
+                            pending.request_text,
+                        ),
+                        execution_check=execution_check,
+                    )
+                    if not execution_check():
+                        self.send_error(403, "Execution authorization is no longer valid")
+                        return
+                    if not PENDING_APPROVALS.complete_execution(
+                        approval_id,
+                        user_id=context.principal.user_id,
+                        session_id=context.session_id,
+                        approval_binding=expected_binding,
+                    ):
+                        self.send_error(409, "Pending approval is no longer valid")
+                        return
+                except ExecutionAuthorizationUnavailable:
+                    self.send_error(503, "Execution authorization is unavailable")
+                    return
                 try:
                     research_result = _restrict_research_response(result)
                 except ConversationStorageUnavailable:
@@ -1730,6 +2144,13 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                         and _is_authoritatively_released(result)
                     ):
                         try:
+                            if not current_context_check():
+                                self.send_error(403, "Execution authorization is no longer valid")
+                                return
+                        except ExecutionAuthorizationUnavailable:
+                            self.send_error(503, "Execution authorization is unavailable")
+                            return
+                        try:
                             MESSAGE_REPOSITORY.append_owned(
                                 UUID(execution["conversation_id"]),
                                 owner_user_id,
@@ -1743,6 +2164,13 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                         except ConversationStorageUnavailable:
                             _conversation_storage_error(self)
                             return
+                try:
+                    if not current_context_check():
+                        self.send_error(403, "Execution authorization is no longer valid")
+                        return
+                except ExecutionAuthorizationUnavailable:
+                    self.send_error(503, "Execution authorization is unavailable")
+                    return
             self._send_json(200, result)
             return
 
@@ -1806,13 +2234,32 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 custom_instructions=payload.get("custom_instructions", ""),
             )
             conversation_id = None
+            execution_check = None
             recent_messages = context_payload.get("recent_messages") if isinstance(context_payload, dict) else None
+            if (
+                request_context.principal.authenticated
+                and not _has_trusted_account_context(request_context)
+            ):
+                self.send_error(401, "A trusted authenticated account session is required")
+                return
             if request_context.principal.authenticated:
                 owner_user_id = request_context.principal.user_id
                 if owner_user_id is None:
                     self.send_error(401, "A valid server-side session is required")
                     return
                 if not _require_owned_active_profile(self, request_context):
+                    return
+                request_context = _revalidate_before_side_effect(
+                    self,
+                    request_context,
+                    require_active_profile=True,
+                )
+                if request_context is None:
+                    return
+                if _deny_unfenced_protected_operation(
+                    self,
+                    UnfencedOperation.AUTHENTICATED_CHAT,
+                ):
                     return
                 profile_id = request_context.active_profile_id
                 created_for_message = conversation_id_value is None
@@ -1851,6 +2298,16 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                         self.send_error(404, "Conversation not found")
                         return
                 conversation_id = conversation.conversation_id
+                execution_context = {
+                    "conversation_id": str(conversation_id),
+                    "profile_id": str(profile_id),
+                }
+                execution_check = lambda: _execution_authorization_check(
+                    self,
+                    request_context,
+                    execution_context=execution_context,
+                    require_active_profile=True,
+                )
                 try:
                     stored_messages = MESSAGE_REPOSITORY.recent_owned(
                         conversation_id,
@@ -1968,7 +2425,13 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                     service_options["orchestration_mode"] = orchestration_mode
                 if research:
                     service_options["research"] = True
-                response = service.respond(message, context=context, **service_options)
+                if execution_check is not None:
+                    service_options["execution_check"] = execution_check
+                try:
+                    response = service.respond(message, context=context, **service_options)
+                except ExecutionAuthorizationUnavailable:
+                    self.send_error(503, "Execution authorization is unavailable")
+                    return
             try:
                 research_result = _restrict_research_response(response)
             except ConversationStorageUnavailable:
@@ -1988,6 +2451,14 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                 ):
                     messages_to_persist += (("assistant", response_message),)
                 if messages_to_persist:
+                    if execution_check is not None:
+                        try:
+                            if not execution_check():
+                                self.send_error(403, "Execution authorization is no longer valid")
+                                return
+                        except ExecutionAuthorizationUnavailable:
+                            self.send_error(503, "Execution authorization is unavailable")
+                            return
                     try:
                         persisted = MESSAGE_REPOSITORY.append_owned(
                             conversation_id,
@@ -2010,6 +2481,14 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                         self.send_error(404, "Conversation not found")
                         return
                 response["conversation_id"] = str(conversation_id)
+            if execution_check is not None:
+                try:
+                    if not execution_check():
+                        self.send_error(403, "Execution authorization is no longer valid")
+                        return
+                except ExecutionAuthorizationUnavailable:
+                    self.send_error(503, "Execution authorization is unavailable")
+                    return
             self._send_json(200, response)
             return
 

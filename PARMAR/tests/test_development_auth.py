@@ -149,6 +149,9 @@ def authenticated_https_api(development_auth, monkeypatch, tmp_path):
         thread.join(timeout=5)
 
 
+from PARMAR.tests.identity_test_support import trusted_session
+
+
 @pytest.fixture
 def development_auth(monkeypatch):
     for key, value in DEV_AUTH_ENV.items():
@@ -201,6 +204,74 @@ def development_login(*, headers=None, body=None):
     )
     futuristic_app.PARMARRequestHandler.do_POST(request)
     return request, response, errors
+
+
+def test_development_session_cannot_access_protected_http_routes(development_auth):
+    _login_request, login_response, login_errors = development_login()
+    assert login_errors == []
+    assert login_response["status"] == 201
+    token = login_response["headers"]["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
+    session = development_auth.resolve(token)
+    assert session is not None
+    csrf_token = development_auth.csrf_token(session.session_id)
+    assert csrf_token is not None
+    cookie = f"{SESSION_COOKIE_NAME}={token}"
+    workspace_id = "00000000-0000-4000-8000-000000000001"
+    profile_id = "00000000-0000-4000-8000-000000000002"
+    requests = [
+        ("GET", "/api/identity/profiles", None),
+        ("GET", "/api/identity/workspaces", None),
+        ("GET", f"/api/identity/workspaces/{workspace_id}/profiles", None),
+        ("GET", "/api/conversations", None),
+        ("GET", "/api/conversations/00000000-0000-4000-8000-000000000003", None),
+        ("GET", "/api/memory", None),
+        ("POST", "/api/session/profile", {"profile_id": profile_id}),
+        ("POST", "/api/identity/profiles", {"name": "Development"}),
+        ("POST", "/api/identity/workspaces", {"name": "Development"}),
+        (
+            "POST",
+            f"/api/identity/workspaces/{workspace_id}/profiles/{profile_id}",
+            {},
+        ),
+        ("POST", "/api/memory", {"action": "consent", "granted": True}),
+        (
+            "POST",
+            "/api/approval",
+            {"approval_id": "untrusted", "decision": "APPROVE"},
+        ),
+        (
+            "POST",
+            "/api/approval/cancel",
+            {"approval_id": "untrusted", "reason_code": "USER_REQUEST"},
+        ),
+        ("POST", "/api/chat", {"message": "Help with project planning."}),
+    ]
+
+    for method, path, payload in requests:
+        headers = {"Cookie": cookie}
+        if method == "POST":
+            headers.update({
+                "X-CSRF-Token": csrf_token,
+                "Origin": DEV_AUTH_ENV["PARMAR_UI_ORIGIN"],
+                "Sec-Fetch-Site": "same-origin",
+            })
+        request, response, errors = make_request(path, body=payload, headers=headers)
+        if method == "GET":
+            futuristic_app.PARMARRequestHandler.do_GET(request)
+        else:
+            futuristic_app.PARMARRequestHandler.do_POST(request)
+
+        if path in {"/api/approval", "/api/approval/cancel"}:
+            assert response["status"] == 403
+            assert errors == []
+        else:
+            expected_message = (
+                "A trusted authenticated account session is required"
+                if path == "/api/chat"
+                else "An authenticated session is required"
+            )
+            assert response == {}
+            assert errors == [(401, expected_message)]
 
 
 def test_development_auth_is_disabled_by_default(monkeypatch):
@@ -341,8 +412,9 @@ def test_authenticated_profile_conversation_workflow_uses_owned_backend_state(
     _login_request, login_response, login_errors = development_login()
     assert login_errors == []
     assert login_response["status"] == 201
-    token = login_response["headers"]["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
-    cookie = f"{SESSION_COOKIE_NAME}={token}"
+    development_token = login_response["headers"]["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
+    development_cookie = f"{SESSION_COOKIE_NAME}={development_token}"
+    cookie = development_cookie
 
     def api_request(path, *, method="GET", payload=None, csrf=None, origin=None):
         headers = {"Cookie": cookie}
@@ -360,6 +432,26 @@ def test_authenticated_profile_conversation_workflow_uses_owned_backend_state(
             futuristic_app.PARMARRequestHandler.do_POST(request)
         return request, response, errors
 
+    _request, session_response, errors = api_request("/api/session")
+    assert errors == []
+    assert session_response["status"] == 200
+    csrf_token = session_response["result"]["csrf_token"]
+    _request, development_profiles, errors = api_request("/api/identity/profiles")
+    assert development_profiles == {}
+    assert errors == [(401, "An authenticated session is required")]
+    _request, development_chat, errors = api_request(
+        "/api/chat",
+        method="POST",
+        payload={"message": "Help with project planning."},
+        csrf=csrf_token,
+    )
+    assert development_chat == {}
+    assert errors == [(401, "A trusted authenticated account session is required")]
+    assert conversations._conversations == {}
+
+    trusted_credentials = trusted_session(development_auth)
+    token = trusted_credentials.session_token
+    cookie = f"{SESSION_COOKIE_NAME}={token}"
     _request, session_response, errors = api_request("/api/session")
     assert errors == []
     assert session_response["status"] == 200
@@ -391,110 +483,86 @@ def test_authenticated_profile_conversation_workflow_uses_owned_backend_state(
     assert cross_origin_response == {}
     assert errors == [(403, "Unsafe request origin is not allowed")]
 
-    _request, personal_response, errors = api_request(
+    _request, profile_response, errors = api_request(
         "/api/identity/profiles",
         method="POST",
         payload={"name": "Personal"},
         csrf=csrf_token,
     )
-    assert errors == []
-    assert personal_response["status"] == 201
-    personal_id = personal_response["result"]["profile_id"]
-
-    _request, work_response, errors = api_request(
-        "/api/identity/profiles",
-        method="POST",
-        payload={"name": "Work"},
-        csrf=csrf_token,
-    )
-    assert errors == []
-    assert work_response["status"] == 201
-    work_id = work_response["result"]["profile_id"]
+    assert profile_response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'profile_workspace_write' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
 
     _request, profiles_response, errors = api_request("/api/identity/profiles")
     assert errors == []
-    assert [profile["profile_id"] for profile in profiles_response["result"]["profiles"]] == [
-        personal_id,
-        work_id,
-    ]
+    assert profiles_response["result"]["profiles"] == []
 
+    personal_profile = identity_repository.create_profile(user_id, "Locally seeded")
+    seeded_selection = development_auth.select_profile(
+        session_id,
+        user_id,
+        personal_profile.profile_id,
+    )
+    assert seeded_selection is not None
     _request, selected_response, errors = api_request(
         "/api/session/profile",
         method="POST",
-        payload={"profile_id": personal_id},
+        payload={"profile_id": str(personal_profile.profile_id)},
         csrf=csrf_token,
     )
-    assert errors == []
-    assert selected_response["result"]["active_profile"]["profile_id"] == personal_id
+    assert selected_response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'session_profile_selection' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert development_auth.resolve(token).active_profile_id == personal_profile.profile_id
 
     memories.set_consent(user_id, True)
-    owned_memory = memories.create_owned(user_id, "Project planning preference.")
-    foreign_user = uuid4()
-    memories.set_consent(foreign_user, True)
-    memories.create_owned(foreign_user, "Project planning belongs to another user.")
     retrieved_memories = []
-
-    class ReleasedChatService:
-        def __init__(self, external_authorization=None):
-            pass
-
-        def respond(self, _prompt, context=None, **options):
-            memory_retriever = options.get("memory_retriever")
-            if memory_retriever is not None:
-                context.memory = memory_retriever()
-                retrieved_memories.extend(context.memory)
-            return {
-                "message": "Personal profile response.",
-                "provider_status": "COMPLETED",
-                "response_disposition": "RELEASED",
-                "voki_contract": {
-                    "lifecycle": {"state": "RELEASED"},
-                    "provider": {"status": "COMPLETED"},
-                    "response_safety": {"status": "PASS"},
-                    "response_disposition": "RELEASED",
-                },
-            }
-
-    monkeypatch.setattr(futuristic_app, "ChatService", ReleasedChatService)
+    memories.create_owned(user_id, "Project planning preference.")
+    monkeypatch.setattr(
+        futuristic_app,
+        "ChatService",
+        lambda **_kwargs: pytest.fail("Authenticated chat reached service dispatch"),
+    )
     _request, chat_response, errors = api_request(
         "/api/chat",
         method="POST",
         payload={"message": "Help with project planning."},
         csrf=csrf_token,
     )
-    assert errors == []
-    assert chat_response["status"] == 200
-    assert retrieved_memories == [owned_memory.content]
-    conversation_id = chat_response["result"]["conversation_id"]
-    stored = conversations.get_owned(UUID(conversation_id), user_id)
-    assert stored is not None and stored.profile_id == UUID(personal_id)
+    assert chat_response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'authenticated_chat' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert retrieved_memories == []
+    assert conversations.list_owned(user_id) == ()
 
     _request, history_response, errors = api_request("/api/conversations")
     assert errors == []
-    assert [item["conversation_id"] for item in history_response["result"]["conversations"]] == [
-        conversation_id,
-    ]
-    _request, retrieved_response, errors = api_request(f"/api/conversations/{conversation_id}")
-    assert errors == []
-    assert [message["content"] for message in retrieved_response["result"]["messages"]] == [
-        "Help with project planning.",
-        "Personal profile response.",
-    ]
+    assert history_response["result"]["conversations"] == []
 
     _request, selected_response, errors = api_request(
         "/api/session/profile",
         method="POST",
-        payload={"profile_id": work_id},
+        payload={"profile_id": str(personal_profile.profile_id)},
         csrf=csrf_token,
     )
-    assert errors == []
-    assert selected_response["result"]["active_profile"]["profile_id"] == work_id
+    assert selected_response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'session_profile_selection' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
     _request, history_response, errors = api_request("/api/conversations")
     assert errors == []
     assert history_response["result"]["conversations"] == []
-    _request, hidden_response, errors = api_request(f"/api/conversations/{conversation_id}")
-    assert hidden_response == {}
-    assert errors == [(404, "Conversation not found")]
 
     _request, logout_response, errors = api_request(
         "/api/logout",
@@ -542,13 +610,32 @@ def test_authenticated_profile_conversation_and_memory_workflow_over_https(
     assert "HttpOnly" in cookie_header
     assert "SameSite=Lax" in cookie_header
     assert "csrf_token" not in payload
-    cookie = cookie_header.split(";", 1)[0]
+    development_cookie = cookie_header.split(";", 1)[0]
+
+    status, _headers, session_payload = request("/api/session", cookie=development_cookie)
+    assert status == 200
+    assert session_payload["authentication_state"] == "DEVELOPMENT_UNVERIFIED"
+    development_csrf_token = session_payload["csrf_token"]
+    status, _headers, _payload = request(
+        "/api/identity/profiles",
+        cookie=development_cookie,
+    )
+    assert status == 401
+    status, _headers, _payload = request(
+        "/api/chat",
+        method="POST",
+        payload={"message": "Help with project planning."},
+        cookie=development_cookie,
+        headers={"X-CSRF-Token": development_csrf_token},
+    )
+    assert status == 401
+    trusted_credentials = trusted_session(api["manager"])
+    cookie = f"{SESSION_COOKIE_NAME}={trusted_credentials.session_token}"
 
     status, _headers, session_payload = request("/api/session", cookie=cookie)
     assert status == 200
-    assert session_payload["authentication_state"] == "DEVELOPMENT_UNVERIFIED"
     csrf_token = session_payload["csrf_token"]
-    session = api["manager"].resolve(cookie.split("=", 1)[1])
+    session = api["manager"].resolve(trusted_credentials.session_token)
     assert session is not None
     user_id = session.user_id
 
@@ -597,24 +684,32 @@ def test_authenticated_profile_conversation_and_memory_workflow_over_https(
     )
     assert status == 400
 
-    status, _headers, first = request(
+    status, _headers, _payload = request(
         "/api/identity/profiles",
         method="POST",
         payload={"name": "Personal"},
         cookie=cookie,
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert status == 201
-    status, _headers, second = request(
+    assert status == 503
+    status, _headers, _payload = request(
         "/api/identity/profiles",
         method="POST",
         payload={"name": "Work"},
         cookie=cookie,
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert status == 201
-    first_profile_id = first["profile_id"]
-    second_profile_id = second["profile_id"]
+    assert status == 503
+    first_profile = api["identity"].create_profile(user_id, "Locally seeded")
+    second_profile = api["identity"].create_profile(user_id, "Locally seeded work")
+    first_profile_id = str(first_profile.profile_id)
+    second_profile_id = str(second_profile.profile_id)
+    selected_session = api["manager"].select_profile(
+        session.session_id,
+        user_id,
+        first_profile.profile_id,
+    )
+    assert selected_session is not None
 
     status, _headers, profiles = request("/api/identity/profiles", cookie=cookie)
     assert status == 200
@@ -638,47 +733,32 @@ def test_authenticated_profile_conversation_and_memory_workflow_over_https(
         cookie=cookie,
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert status == 404
+    assert status == 503
 
-    status, _headers, selected = request(
+    status, _headers, _payload = request(
         "/api/session/profile",
         method="POST",
         payload={"profile_id": first_profile_id},
         cookie=cookie,
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert status == 200
-    assert selected["active_profile"]["profile_id"] == first_profile_id
+    assert status == 503
+    assert api["manager"].resolve(trusted_credentials.session_token).active_profile_id == first_profile.profile_id
 
-    api["memories"].set_consent(user_id, True)
-    owned_memory = api["memories"].create_owned(user_id, "Project planning checklist.")
-    foreign_user = uuid4()
-    api["memories"].set_consent(foreign_user, True)
-    api["memories"].create_owned(foreign_user, "Project planning from another user.")
+    status, _headers, _payload = request(
+        "/api/memory",
+        method="POST",
+        payload={"action": "consent", "granted": True},
+        cookie=cookie,
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert status == 503
     retrieved_memory = []
-
-    class ReleasedChatService:
-        def __init__(self, external_authorization=None):
-            pass
-
-        def respond(self, _prompt, context=None, **options):
-            retriever = options.get("memory_retriever")
-            if retriever is not None:
-                context.memory = retriever()
-                retrieved_memory.extend(context.memory)
-            return {
-                "message": "Released test response.",
-                "provider_status": "COMPLETED",
-                "response_disposition": "RELEASED",
-                "voki_contract": {
-                    "lifecycle": {"state": "RELEASED"},
-                    "provider": {"status": "COMPLETED"},
-                    "response_safety": {"status": "PASS"},
-                    "response_disposition": "RELEASED",
-                },
-            }
-
-    monkeypatch.setattr(futuristic_app, "ChatService", ReleasedChatService)
+    monkeypatch.setattr(
+        futuristic_app,
+        "ChatService",
+        lambda **_kwargs: pytest.fail("Authenticated chat reached service dispatch"),
+    )
     status, _headers, chat = request(
         "/api/chat",
         method="POST",
@@ -686,25 +766,13 @@ def test_authenticated_profile_conversation_and_memory_workflow_over_https(
         cookie=cookie,
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert status == 200
-    assert retrieved_memory == [owned_memory.content]
-    conversation_id = chat["conversation_id"]
-    stored = api["conversations"].get_owned(UUID(conversation_id), user_id)
-    assert stored is not None
-    assert stored.profile_id == UUID(first_profile_id)
+    assert status == 503
+    assert b"atomic authorization fence is unavailable" in chat
+    assert retrieved_memory == []
 
     status, _headers, history = request("/api/conversations", cookie=cookie)
     assert status == 200
-    assert [item["conversation_id"] for item in history["conversations"]] == [conversation_id]
-    status, _headers, conversation = request(
-        f"/api/conversations/{conversation_id}",
-        cookie=cookie,
-    )
-    assert status == 200
-    assert [message["content"] for message in conversation["messages"]] == [
-        "Help with project planning.",
-        "Released test response.",
-    ]
+    assert history["conversations"] == []
 
     status, _headers, _selected = request(
         "/api/session/profile",
@@ -713,15 +781,10 @@ def test_authenticated_profile_conversation_and_memory_workflow_over_https(
         cookie=cookie,
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert status == 200
+    assert status == 503
     status, _headers, history = request("/api/conversations", cookie=cookie)
     assert status == 200
     assert history["conversations"] == []
-    status, _headers, _payload = request(
-        f"/api/conversations/{conversation_id}",
-        cookie=cookie,
-    )
-    assert status == 404
 
     status, headers, logout = request(
         "/api/logout",

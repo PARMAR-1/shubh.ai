@@ -17,6 +17,7 @@ from PARMAR.sessions import (
     SESSION_COOKIE_NAME,
     SessionManager,
     SessionPolicy,
+    SQLiteSessionRepository,
 )
 
 
@@ -35,12 +36,19 @@ def memory_setup(monkeypatch, tmp_path):
     return repository, tmp_path / "memory-audit.jsonl"
 
 
+from PARMAR.identity_contracts import AccountIdentity
+from PARMAR.tests.identity_test_support import trusted_session
+
+
 def make_session(monkeypatch, *, user_id=None, now=None, manager=None):
     manager = manager or SessionManager(
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900),
     )
-    credentials = manager.create_authenticated_session(user_id or uuid4(), "memory-http-test", now=now)
+    account_identity = (
+        AccountIdentity(user_id) if user_id is not None else AccountIdentity.generate()
+    )
+    credentials = trusted_session(manager, account_identity, now=now)
     monkeypatch.setattr(futuristic_app, "SESSION_MANAGER", manager)
     return manager, credentials
 
@@ -80,88 +88,74 @@ def memory_request(path, *, method="GET", body=None, credentials=None, csrf=True
     return result, errors
 
 
-def test_authenticated_memory_requires_consent_then_supports_crud_and_lists_own_records(
-    monkeypatch,
-    memory_setup,
-):
+def test_authenticated_memory_mutations_are_runtime_no_go_before_storage(monkeypatch, memory_setup):
     repository, _audit_path = memory_setup
     credentials = make_session(monkeypatch)
+
+    def forbidden_write(*_args, **_kwargs):
+        pytest.fail("The memory repository was reached despite the runtime NO-GO gate")
+
+    monkeypatch.setattr(repository, "set_consent", forbidden_write)
+    monkeypatch.setattr(repository, "create_owned", forbidden_write)
+    monkeypatch.setattr(repository, "update_owned", forbidden_write)
+    monkeypatch.setattr(repository, "delete_owned", forbidden_write)
+    monkeypatch.setattr(repository, "clear_owned", forbidden_write)
+    for body in (
+        {"action": "consent", "granted": True},
+        {"action": "save", "content": "Prefers concise summaries"},
+        {"action": "update", "memory_id": str(uuid4()), "content": "Updated"},
+        {"action": "delete", "memory_id": str(uuid4())},
+        {"action": "clear_all"},
+    ):
+        result, errors = memory_request(
+            "/api/memory",
+            method="POST",
+            body=body,
+            credentials=credentials,
+        )
+        assert result == {}
+        assert errors == [(
+            503,
+            "Protected operation 'protected_memory_mutation' is disabled: "
+            "an atomic authorization fence is unavailable.",
+        )]
+
+
+def test_memory_write_no_go_precedes_store_write_and_concurrent_revocation(
+    monkeypatch,
+    memory_setup,
+    tmp_path,
+):
+    manager = SessionManager(
+        SQLiteSessionRepository(
+            tmp_path / "sessions.sqlite3",
+            integrity_key=b"memory write fencing test key: stable",
+        ),
+        SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900),
+    )
+    credentials = make_session(monkeypatch, manager=manager)
+    repository = SQLiteMemoryRepository(tmp_path / "memories.sqlite3")
+    repository.set_consent(credentials[1].session.user_id, True)
+    monkeypatch.setattr(futuristic_app, "MEMORY_REPOSITORY", repository)
+    def forbidden_write(*_args, **_kwargs):
+        pytest.fail("The memory repository was reached despite the runtime NO-GO gate")
+
+    monkeypatch.setattr(repository, "create_owned", forbidden_write)
     result, errors = memory_request(
         "/api/memory",
         method="POST",
-        body={"action": "save", "content": "Prefers concise summaries"},
+        body={"action": "save", "content": "Write crossed the NO-GO race boundary"},
         credentials=credentials,
     )
-    assert result["status"] == 403
-    assert result["result"]["error"] == "MEMORY_CONSENT_REQUIRED"
-    assert errors == []
+
+    assert result == {}
+    assert errors == [(
+        503,
+        "Protected operation 'protected_memory_mutation' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert manager.resolve(credentials[1].session_token) is not None
     assert repository.list_owned(credentials[1].session.user_id) == ()
-
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "consent", "granted": True},
-        credentials=credentials,
-    )
-    assert result["status"] == 200
-    assert result["result"] == {"consent": True}
-    assert result["headers"] == {"Cache-Control": "no-store"}
-    assert errors == []
-
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "save", "content": "Prefers concise summaries"},
-        credentials=credentials,
-    )
-    memory_id = UUID(result["result"]["memory_id"])
-    assert result["status"] == 201
-    assert result["result"]["provenance"] == "explicit_user_save"
-    assert errors == []
-
-    result, errors = memory_request("/api/memory", credentials=credentials)
-    assert result["result"]["consent"] is True
-    assert [record["memory_id"] for record in result["result"]["memories"]] == [str(memory_id)]
-    assert "owner_user_id" not in json.dumps(result)
-    assert errors == []
-
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "update", "memory_id": str(memory_id), "content": "Prefers short summaries"},
-        credentials=credentials,
-    )
-    assert result["status"] == 200
-    assert result["result"]["content"] == "Prefers short summaries"
-    assert result["result"]["provenance"] == "explicit_user_update"
-    assert errors == []
-
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "consent", "granted": False},
-        credentials=credentials,
-    )
-    assert result["result"]["consent"] is False
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "save", "content": "No longer consented"},
-        credentials=credentials,
-    )
-    assert result["status"] == 403
-    assert errors == []
-
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "delete", "memory_id": str(memory_id)},
-        credentials=credentials,
-    )
-    assert result["status"] == 200
-    assert result["result"] == {"deleted": True}
-    assert result["headers"] == {"Cache-Control": "no-store"}
-    assert errors == []
 
 
 def test_anonymous_memory_access_is_rejected_and_local_demo_does_not_create_records(
@@ -270,30 +264,23 @@ def test_memory_ownership_and_bad_ids_are_not_disclosed(monkeypatch, memory_setu
     record = repository.create_owned(owner[1].session.user_id, "Owner-only note")
     other = make_session(monkeypatch, manager=owner[0])
 
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "update", "memory_id": str(record.memory_id), "content": "stolen"},
-        credentials=other,
-    )
-    assert result == {}
-    assert errors == [(404, "Memory not found")]
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "delete", "memory_id": str(record.memory_id)},
-        credentials=other,
-    )
-    assert result == {}
-    assert errors == [(404, "Memory not found")]
-    result, errors = memory_request(
-        "/api/memory",
-        method="POST",
-        body={"action": "delete", "memory_id": "malformed"},
-        credentials=owner,
-    )
-    assert result == {}
-    assert errors == [(404, "Memory not found")]
+    for session, body in (
+        (other, {"action": "update", "memory_id": str(record.memory_id), "content": "stolen"}),
+        (other, {"action": "delete", "memory_id": str(record.memory_id)}),
+        (owner, {"action": "delete", "memory_id": "malformed"}),
+    ):
+        result, errors = memory_request(
+            "/api/memory",
+            method="POST",
+            body=body,
+            credentials=session,
+        )
+        assert result == {}
+        assert errors == [(
+            503,
+            "Protected operation 'protected_memory_mutation' is disabled: "
+            "an atomic authorization fence is unavailable.",
+        )]
     assert repository.list_owned(owner[1].session.user_id) == (record,)
 
 
@@ -310,9 +297,13 @@ def test_credential_like_memory_is_refused_and_never_written_to_audit(monkeypatc
         credentials=credentials,
     )
 
-    assert result["status"] == 400
-    assert secret not in json.dumps(result)
-    assert errors == []
+    assert result == {}
+    assert errors == [(
+        503,
+        "Protected operation 'protected_memory_mutation' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert secret not in str(errors)
     assert repository.list_owned(credentials[1].session.user_id) == ()
     assert not audit_path.exists()
 
@@ -330,13 +321,14 @@ def test_memory_audit_contains_only_fixed_metadata(monkeypatch, memory_setup):
         credentials=credentials,
     )
 
-    audit = audit_path.read_text(encoding="utf-8")
-    assert result["status"] == 201
-    assert errors == []
-    assert "memory_operation" in audit
-    assert "explicit_user_save" not in audit
-    assert secretish_note not in audit
-    assert "content" not in audit
+    assert result == {}
+    assert errors == [(
+        503,
+        "Protected operation 'protected_memory_mutation' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert not audit_path.exists()
+    assert repository.list_owned(credentials[1].session.user_id) == ()
 
 
 def test_durable_memory_is_shared_across_sessions_for_same_user_only(monkeypatch, tmp_path):
@@ -344,8 +336,10 @@ def test_durable_memory_is_shared_across_sessions_for_same_user_only(monkeypatch
     monkeypatch.setattr(futuristic_app, "MEMORY_REPOSITORY", repository)
     owner = uuid4()
     manager, first_credentials = make_session(monkeypatch, user_id=owner)
-    second_credentials = manager.create_authenticated_session(owner, "second-session")
-    other_credentials = manager.create_authenticated_session(uuid4(), "other-user")
+    _, second_credentials = make_session(
+        monkeypatch, user_id=owner, manager=manager,
+    )
+    _, other_credentials = make_session(monkeypatch, manager=manager)
     repository.set_consent(owner, True)
     record = repository.create_owned(owner, "Shared project preference")
 
@@ -400,10 +394,13 @@ def test_authenticated_clear_all_is_csrf_protected_and_owner_scoped(monkeypatch,
         body={"action": "clear_all"},
         credentials=owner_credentials,
     )
-    assert errors == []
-    assert result["status"] == 200
-    assert result["result"] == {"deleted": True, "deleted_count": 2}
-    assert repository.list_owned(owner) == ()
+    assert result == {}
+    assert errors == [(
+        503,
+        "Protected operation 'protected_memory_mutation' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert len(repository.list_owned(owner)) == 2
     assert repository.list_owned(other) == (other_record,)
 
 

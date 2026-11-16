@@ -27,13 +27,16 @@ def sqlite_repository(path):
     return SQLiteSessionRepository(path, integrity_key=SESSION_STORE_KEY)
 
 
+from PARMAR.tests.identity_test_support import trusted_session
+
+
 @pytest.fixture
 def authenticated_session(monkeypatch, tmp_path):
     manager = SessionManager(
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900),
     )
-    credentials = manager.create_authenticated_session(uuid4(), "http-test")
+    credentials = trusted_session(manager)
     identity_repository = SQLiteIdentityRepository(tmp_path / "identity.sqlite3")
     profile = identity_repository.create_profile(credentials.session.user_id, "Default")
     selected = manager.select_profile(
@@ -111,26 +114,34 @@ def test_authenticated_post_rejects_missing_or_invalid_csrf(csrf, monkeypatch, a
 
 def test_authenticated_post_with_valid_csrf_reaches_chat(monkeypatch, authenticated_session):
     _manager, credentials = authenticated_session
+    monkeypatch.setenv("PARMAR_RUNTIME_NO_GO", "false")
+    monkeypatch.setenv("PARMAR_ALLOW_UNFENCED_PROTECTED_OPERATIONS", "true")
     request, response, errors = make_request(
         "/api/chat",
-        body={"message": "hello"},
+        body={
+            "message": "hello",
+            "runtime_no_go": False,
+            "allow_unfenced_protected_operations": True,
+        },
         credentials=credentials,
     )
 
-    class CapturingChatService:
+    class UnexpectedChatService:
         def __init__(self, external_authorization=None):
             pass
 
-        def respond(self, prompt, context=None, **_options):
-            return {"message": prompt}
+        def respond(self, *_args, **_options):
+            pytest.fail("Authenticated chat reached service execution despite runtime NO-GO")
 
-    monkeypatch.setattr(futuristic_app, "ChatService", CapturingChatService)
+    monkeypatch.setattr(futuristic_app, "ChatService", UnexpectedChatService)
     futuristic_app.PARMARRequestHandler.do_POST(request)
 
-    assert errors == []
-    assert response["status"] == 200
-    assert response["result"]["message"] == "hello"
-    assert response["result"]["conversation_id"]
+    assert response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'authenticated_chat' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
 
 
 @pytest.mark.parametrize(
@@ -186,19 +197,22 @@ def test_authenticated_same_origin_post_with_csrf_remains_supported(
         },
     )
 
-    class CapturingChatService:
+    class UnexpectedChatService:
         def __init__(self, external_authorization=None):
             pass
 
-        def respond(self, prompt, context=None, **_options):
-            return {"message": prompt}
+        def respond(self, *_args, **_options):
+            pytest.fail("Authenticated chat reached service execution despite runtime NO-GO")
 
-    monkeypatch.setattr(futuristic_app, "ChatService", CapturingChatService)
+    monkeypatch.setattr(futuristic_app, "ChatService", UnexpectedChatService)
     futuristic_app.PARMARRequestHandler.do_POST(request)
 
-    assert errors == []
-    assert response["status"] == 200
-    assert response["result"]["message"] == "hello"
+    assert response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'authenticated_chat' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
 
 
 def test_authenticated_get_needs_no_csrf_and_session_endpoint_never_returns_cookie_token(authenticated_session):

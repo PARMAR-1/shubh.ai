@@ -6,7 +6,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -650,6 +650,7 @@ class AIOrchestrator:
         capability: str = TEXT,
         input_modality: str = "text",
         output_modality: str = "text",
+        execution_check: Callable[[], bool] | None = None,
     ) -> OrchestrationResult:
         plan = self.plan(
             mode=mode,
@@ -703,6 +704,20 @@ class AIOrchestrator:
             available=True,
             fallback_allowed=False,
         )
+        if execution_check is not None and execution_check() is not True:
+            return replace(
+                plan,
+                available=False,
+                failure_reason="Execution authorization is no longer current.",
+                failure_state="EXECUTION_AUTHORIZATION_DENIED",
+                candidates=(CandidateResult(
+                    plan.selected_provider or "configured",
+                    plan.selected_model or "unknown",
+                    "NOT_EXECUTED",
+                    normalized_error="EXECUTION_AUTHORIZATION_DENIED",
+                ),),
+                routing=routing,
+            )
         try:
             response = self.router.route(prompt, context=context, selection=routing)
         except TimeoutError:
@@ -794,6 +809,7 @@ class AIOrchestrator:
         capability: str = TEXT,
         input_modality: str = "text",
         output_modality: str = "text",
+        execution_check: Callable[[], bool] | None = None,
     ) -> OrchestrationResult:
         """Run a bounded candidate set after PARMAR supplies a safe context.
 
@@ -973,6 +989,13 @@ class AIOrchestrator:
         safe_prompt = sanitize_provider_text(prompt)
         candidate_results: list[CandidateResult] = []
         for model in ordered_models:
+            if execution_check is not None and execution_check() is not True:
+                return self._execution_failure(
+                    capability,
+                    "EXECUTION_AUTHORIZATION_DENIED",
+                    "Execution authorization is no longer current.",
+                    candidates=tuple(candidate_results),
+                )
             selection = ProviderRoutingResult(
                 adapter=model.adapter,
                 selected_provider=_public_identifier(model.provider_id) or "configured",

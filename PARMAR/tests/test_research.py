@@ -29,6 +29,7 @@ from PARMAR.sessions import (
     SessionManager,
     SessionPolicy,
 )
+from PARMAR.safety.runtime_no_go import RuntimeNoGo, UnfencedOperation
 from uuid import uuid4
 from PARMAR.research.models import (
     CONTRACT_VERSION,
@@ -370,7 +371,7 @@ def test_blocked_and_approval_required_chat_requests_never_reach_search_provider
     assert calls == []
 
 
-def test_approved_research_continues_only_after_existing_approval_boundary():
+def test_approved_research_continuation_is_runtime_no_go_before_search():
     request = "Transfer $500 from the department budget to buy a laptop."
     review, dashboard, summary = PARMARUIAdapter.analyze_request_with_dashboard(request)
     assert review["status"] == "APPROVAL_REQUIRED"
@@ -393,19 +394,16 @@ def test_approved_research_continues_only_after_existing_approval_boundary():
         research_service=SearchService(Search()),
         external_authorization=AUTHORIZATION,
     )
-    result = service.respond_approved(
-        request,
-        approved_response=approval_result,
-        dashboard=dashboard,
-        summary=summary,
-        research=True,
-    )
-
-    assert calls == [request]
-    assert result["research"]["status"] == "NO_RESULTS"
-    assert result["voki_contract"]["approval"]["status"] == "APPROVED"
-    assert result["voki_contract"]["provider"]["status"] == "COMPLETED"
-    assert result["voki_contract"]["enforcement"]["execution_allowed"] is True
+    with pytest.raises(RuntimeNoGo) as error:
+        service.respond_approved(
+            request,
+            approved_response=approval_result,
+            dashboard=dashboard,
+            summary=summary,
+            research=True,
+        )
+    assert error.value.operation is UnfencedOperation.APPROVED_CHAT_CONTINUATION
+    assert calls == []
 
 
 def test_pending_research_mode_survives_approval_store_restart(tmp_path):
@@ -543,14 +541,17 @@ def test_chat_http_forwards_explicit_research_mode(monkeypatch):
     assert calls == [("What is photosynthesis?", {"research": True})]
 
 
-def test_research_sources_persist_with_released_history_across_repository_restart(monkeypatch, tmp_path):
+from PARMAR.tests.identity_test_support import trusted_session
+
+
+def test_authenticated_research_is_runtime_no_go_before_search_or_history_write(monkeypatch, tmp_path):
     from PARMAR.interface import futuristic_app
 
     manager = SessionManager(
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900),
     )
-    credentials = manager.create_authenticated_session(uuid4(), "research-conversation-test")
+    credentials = trusted_session(manager)
     identity_repository = SQLiteIdentityRepository(tmp_path / "research-identity.sqlite3")
     profile = identity_repository.create_profile(credentials.session.user_id, "Research history")
     selected = manager.select_profile(
@@ -604,38 +605,11 @@ def test_research_sources_persist_with_released_history_across_repository_restar
 
     futuristic_app.PARMARRequestHandler.do_POST(request)
 
-    assert response["status"] == 200
-    chat_response = response["result"]
-    assert chat_response["research"]["sources"][0]["url"].startswith("https://example.org/")
-    conversation_id = chat_response["conversation_id"]
-    monkeypatch.setattr(
-        futuristic_app,
-        "CONVERSATION_REPOSITORY",
-        SQLiteConversationRepository(tmp_path / "research-history.sqlite3"),
+    assert response["status"] == 503
+    assert response["error"] == (
+        "Protected operation 'authenticated_chat' is disabled: "
+        "an atomic authorization fence is unavailable."
     )
-    monkeypatch.setattr(
-        futuristic_app,
-        "MESSAGE_REPOSITORY",
-        futuristic_app.CONVERSATION_REPOSITORY,
-    )
-    loaded = {}
-    get_request = SimpleNamespace(
-        path=f"/api/conversations/{conversation_id}",
-        headers={"Cookie": f"{SESSION_COOKIE_NAME}={credentials.session_token}"},
-        send_error=lambda status, message: loaded.update(status=status, error=message),
-        _send_json_with_headers=lambda status, result, _headers: loaded.update(
-            status=status, result=result,
-        ),
-    )
-
-    futuristic_app.PARMARRequestHandler.do_GET(get_request)
-
-    assert loaded["status"] == 200
-    assert [message["role"] for message in loaded["result"]["messages"]] == ["user", "assistant"]
-    assert loaded["result"]["messages"][0]["content"] == "What is photosynthesis?"
-    historical_assistant = loaded["result"]["messages"][1]
-    assert historical_assistant["content"] == chat_response["message"]
-    assert historical_assistant["research"]["sources"][0]["url"] == chat_response["research"]["sources"][0]["url"]
-    assert historical_assistant["research_retrieved_at"]
-    assert search.calls == ["What is photosynthesis?"]
+    assert search.calls == []
+    assert repository.list_owned(credentials.session.user_id) == ()
     assert memory_repository.list_owned(credentials.session.user_id) == ()

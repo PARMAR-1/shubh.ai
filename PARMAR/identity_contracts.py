@@ -8,7 +8,7 @@ PARMAR accounts.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Protocol
@@ -106,18 +106,34 @@ class ProviderIdentity:
                 raise ValueError(f"Provider identity {label} is invalid.")
 
 
+class IdentityEvidenceState(str, Enum):
+    """Persisted lifecycle states for evidence bound to a protected session."""
+
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+    SUPERSEDED = "SUPERSEDED"
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticationContext:
     """Time-bounded result of trusted authentication, without provider choice."""
 
     authenticated_at: datetime
     expires_at: datetime
+    evidence_id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
         authenticated_at = _utc_datetime(self.authenticated_at, "authenticated_at")
         expires_at = _utc_datetime(self.expires_at, "expires_at")
         if expires_at <= authenticated_at:
             raise ValueError("Authentication expiry must follow authentication time.")
+        if (
+            type(self.evidence_id) is not UUID
+            or self.evidence_id.version != 4
+            or self.evidence_id.variant != RFC_4122
+        ):
+            raise ValueError("Identity evidence must have an RFC 4122 UUIDv4 identifier.")
         object.__setattr__(self, "authenticated_at", authenticated_at)
         object.__setattr__(self, "expires_at", expires_at)
 
@@ -150,6 +166,18 @@ class ProviderAccountBindingLookup(Protocol):
         """Return an existing binding; implementations must not create or merge one."""
 
 
+class TrustedIdentityResolver(Protocol):
+    """Server-configured boundary that resolves evidence to a pre-bound PARMAR account."""
+
+    def resolve(
+        self,
+        evidence: object,
+        *,
+        now: datetime | None = None,
+    ) -> AuthenticatedPrincipal | None:
+        """Return a current principal only for verified evidence with an existing binding."""
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticatedPrincipal:
     """Server-established PARMAR account and minimal authentication context."""
@@ -169,7 +197,12 @@ def authentication_is_current(
     *,
     now: datetime | None = None,
 ) -> bool:
-    if type(authentication) is not AuthenticationContext:
+    if (
+        type(authentication) is not AuthenticationContext
+        or type(authentication.evidence_id) is not UUID
+        or authentication.evidence_id.version != 4
+        or authentication.evidence_id.variant != RFC_4122
+    ):
         return False
     current = _now_utc(now)
     return authentication.authenticated_at <= current < authentication.expires_at
@@ -394,7 +427,7 @@ class AuthorizationDecision:
 
 @dataclass(frozen=True, slots=True)
 class ActionApprovalBinding:
-    """Opaque one-use approval scope; actor IDs are not PARMAR account identities."""
+    """Opaque one-use approval scope bound to the server-resolved actor context."""
 
     actor_id: UUID
     action: str

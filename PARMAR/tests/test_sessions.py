@@ -1,11 +1,27 @@
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
+from PARMAR.identity import (
+    Principal,
+    ProviderBoundIdentityResolver,
+    TRUSTED_IDENTITY_SOURCE,
+)
+from PARMAR.identity_contracts import (
+    AccountIdentity,
+    AuthenticationContext,
+    AuthenticatedPrincipal,
+    IdentityEvidenceState,
+    ProviderIdentity,
+    VerifiedProviderIdentity,
+)
 from PARMAR.sessions import (
     InMemorySessionRepository,
     SESSION_COOKIE_NAME,
@@ -35,6 +51,15 @@ def make_manager(*, idle=10, absolute=30, csrf_secret=b"c" * 32):
     ), repository
 
 
+def fixed_identity_resolver(account_identity, authentication):
+    class Resolver:
+        def resolve(self, _evidence, *, now=None):
+            del now
+            return AuthenticatedPrincipal(account_identity, authentication)
+
+    return Resolver()
+
+
 def test_session_creation_stores_only_token_hash_and_resolves_server_identity():
     manager, repository = make_manager()
     user_id = uuid4()
@@ -51,6 +76,7 @@ def test_session_creation_stores_only_token_hash_and_resolves_server_identity():
         "session_id", "user_id", "authentication_source", "created_at",
         "last_activity_at", "idle_expires_at", "absolute_expires_at",
         "status", "revoked_at", "replaced_by", "active_profile_id",
+        "account_identity", "authentication_context", "identity_evidence_id",
     }
 
 
@@ -157,6 +183,11 @@ def test_sqlite_session_migrates_v1_without_invalidating_existing_session(tmp_pa
     credentials = manager.create_authenticated_session(uuid4(), "trusted-test-auth", now=START)
     with sqlite3.connect(database_path) as connection:
         connection.execute("ALTER TABLE sessions DROP COLUMN active_profile_id")
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_expires_at")
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_authenticated_at")
+        connection.execute("ALTER TABLE sessions DROP COLUMN account_identity")
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_evidence_id")
+        connection.execute("DROP TABLE identity_evidence")
         connection.execute("PRAGMA user_version = 1")
 
     migrated = SessionManager(sqlite_repository(database_path), policy)
@@ -165,10 +196,449 @@ def test_sqlite_session_migrates_v1_without_invalidating_existing_session(tmp_pa
     assert restored is not None
     assert restored.active_profile_id is None
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert "active_profile_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(sessions)")
         }
+        assert "account_identity" in {
+            row[1] for row in connection.execute("PRAGMA table_info(sessions)")
+        }
+
+
+def test_sqlite_session_migrates_v2_as_unmapped_and_preserves_profile_context(tmp_path):
+    database_path = tmp_path / "v2-sessions.sqlite3"
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    user_id = uuid4()
+    credentials = manager.create_authenticated_session(user_id, "legacy-test-auth", now=START)
+    profile_id = uuid4()
+    assert manager.select_profile(
+        credentials.session.session_id,
+        user_id,
+        profile_id,
+        now=START,
+    ) is not None
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_expires_at")
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_authenticated_at")
+        connection.execute("ALTER TABLE sessions DROP COLUMN account_identity")
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_evidence_id")
+        connection.execute("DROP TABLE identity_evidence")
+        connection.execute("PRAGMA user_version = 2")
+
+    restarted = SessionManager(sqlite_repository(database_path), policy)
+    restored = restarted.resolve(credentials.session_token, now=START + timedelta(seconds=1))
+
+    assert restored is not None
+    assert restored.account_identity is None
+    assert restored.authentication_context is None
+    assert restored.active_profile_id == profile_id
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_trusted_identity_session_is_resolved_and_persisted_without_client_identity(tmp_path):
+    database_path = tmp_path / "identity-sessions.sqlite3"
+    account = AccountIdentity.generate()
+    provider = ProviderIdentity("issuer", "subject-1")
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+
+    class Adapter:
+        def verify(self, evidence):
+            if evidence != "verified-provider-proof":
+                return None
+            return VerifiedProviderIdentity(provider, authentication)
+
+    class Bindings:
+        def find_existing_account(self, identity):
+            return account if identity == provider else None
+
+    resolver = ProviderBoundIdentityResolver(Adapter(), Bindings())
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    credentials = manager.create_identity_session(
+        resolver,
+        "verified-provider-proof",
+        now=START + timedelta(seconds=1),
+    )
+
+    assert credentials is not None
+    assert credentials.session.user_id == account.value
+    assert credentials.session.authentication_source == TRUSTED_IDENTITY_SOURCE
+    assert credentials.session.account_identity == account
+    resolved = manager.resolve_identity(
+        credentials.session_token,
+        now=START + timedelta(seconds=2),
+    )
+    assert resolved == AuthenticatedPrincipal(account, authentication)
+    assert manager.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.ACTIVE
+
+    restarted = SessionManager(sqlite_repository(database_path), policy)
+    assert restarted.resolve_identity(
+        credentials.session_token,
+        now=START + timedelta(seconds=3),
+    ) == AuthenticatedPrincipal(account, authentication)
+    rotated = restarted.rotate(
+        credentials.session_token,
+        now=START + timedelta(seconds=4),
+    )
+    assert rotated is not None
+    after_rotation_restart = SessionManager(sqlite_repository(database_path), policy)
+    assert after_rotation_restart.resolve_identity(
+        rotated.session_token,
+        now=START + timedelta(seconds=5),
+    ) == AuthenticatedPrincipal(account, authentication)
+    assert after_rotation_restart.resolve_identity(
+        rotated.session_token,
+        now=START + timedelta(minutes=5),
+    ) is None
+    assert after_rotation_restart.identity_evidence_state(
+        authentication.evidence_id,
+    ) is IdentityEvidenceState.EXPIRED
+
+
+def test_sqlite_session_identity_binding_rejects_database_substitution(tmp_path):
+    database_path = tmp_path / "substituted-identity.sqlite3"
+    account = AccountIdentity.generate()
+
+    class Resolver:
+        def resolve(self, _evidence, *, now=None):
+            current = now or START
+            return AuthenticatedPrincipal(
+                account,
+                AuthenticationContext(current, current + timedelta(minutes=5)),
+            )
+
+    manager = SessionManager(
+        sqlite_repository(database_path),
+        SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30),
+    )
+    credentials = manager.create_identity_session(Resolver(), "evidence", now=START)
+    assert credentials is not None
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET account_identity = ? WHERE session_id = ?",
+            (AccountIdentity.generate().serialize(), str(credentials.session.session_id)),
+        )
+
+    with pytest.raises(SessionStorageUnavailable):
+        SessionManager(
+            sqlite_repository(database_path),
+            SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30),
+        ).resolve_identity(credentials.session_token, now=START + timedelta(seconds=1))
+
+
+def test_v3_trusted_session_without_evidence_record_migrates_as_revoked(tmp_path):
+    database_path = tmp_path / "v3-identity-session.sqlite3"
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    account = AccountIdentity.generate()
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "proof",
+        now=START,
+    )
+    assert credentials is not None
+    token_hash = sha256(credentials.session_token.encode("ascii")).hexdigest()
+    legacy_session = replace(credentials.session, identity_evidence_id=None)
+    legacy_tag = SQLiteSessionRepository._session_integrity_tag(
+        legacy_session,
+        token_hash,
+        SESSION_STORE_KEY,
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET identity_evidence_id = NULL, integrity_tag = ? WHERE session_id = ?",
+            (legacy_tag, str(credentials.session.session_id)),
+        )
+        connection.execute("DROP TABLE identity_evidence")
+        connection.execute("ALTER TABLE sessions DROP COLUMN identity_evidence_id")
+        connection.execute("PRAGMA user_version = 3")
+
+    restarted = SessionManager(sqlite_repository(database_path), policy)
+    assert restarted.resolve(credentials.session_token, now=START + timedelta(seconds=1)) is None
+    migrated = restarted.repository.get_by_session_id(credentials.session.session_id)
+    assert migrated.status == "REVOKED"
+
+
+def test_tampered_identity_evidence_lifecycle_fails_closed(tmp_path):
+    database_path = tmp_path / "tampered-evidence.sqlite3"
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    account = AccountIdentity.generate()
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "proof",
+        now=START,
+    )
+    assert credentials is not None
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE identity_evidence SET state = 'REVOKED' WHERE evidence_id = ?",
+            (str(authentication.evidence_id),),
+        )
+
+    with pytest.raises(SessionStorageUnavailable):
+        SessionManager(sqlite_repository(database_path), policy).resolve(
+            credentials.session_token,
+            now=START + timedelta(seconds=1),
+        )
+
+
+def test_trusted_identity_survives_session_rotation_without_substitution():
+    manager, _repository = make_manager(absolute=30)
+    account = AccountIdentity.generate()
+
+    class Resolver:
+        def resolve(self, _evidence, *, now=None):
+            current = now or START
+            return AuthenticatedPrincipal(
+                account,
+                AuthenticationContext(current, current + timedelta(minutes=5)),
+            )
+
+    credentials = manager.create_identity_session(Resolver(), "evidence", now=START)
+    assert credentials is not None
+    rotated = manager.rotate(
+        credentials.session_token,
+        now=START + timedelta(seconds=1),
+    )
+
+    assert rotated is not None
+    assert rotated.session.account_identity == account
+    assert rotated.session.authentication_context == credentials.session.authentication_context
+    assert manager.resolve_identity(
+        credentials.session_token,
+        now=START + timedelta(seconds=2),
+    ) is None
+    assert manager.resolve_identity(
+        rotated.session_token,
+        now=START + timedelta(seconds=2),
+    ) == AuthenticatedPrincipal(
+        account,
+        credentials.session.authentication_context,
+    )
+    assert manager.identity_evidence_state(
+        credentials.session.identity_evidence_id,
+    ) is IdentityEvidenceState.ACTIVE
+
+
+def test_identity_evidence_replay_and_cross_account_reuse_are_denied():
+    manager, _repository = make_manager()
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+    first_account = AccountIdentity.generate()
+    first_resolver = fixed_identity_resolver(first_account, authentication)
+
+    credentials = manager.create_identity_session(first_resolver, "proof", now=START)
+    assert credentials is not None
+    assert manager.create_identity_session(first_resolver, "proof", now=START) is None
+    assert manager.create_identity_session(
+        fixed_identity_resolver(AccountIdentity.generate(), authentication),
+        "proof",
+        now=START,
+    ) is None
+    assert manager.resolve_identity(credentials.session_token, now=START) == AuthenticatedPrincipal(
+        first_account,
+        authentication,
+    )
+    assert manager.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.ACTIVE
+
+
+def test_session_and_evidence_revocation_are_atomic_and_persisted(tmp_path):
+    database_path = tmp_path / "revoked-evidence.sqlite3"
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    account = AccountIdentity.generate()
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "proof",
+        now=START,
+    )
+    assert credentials is not None
+    assert manager.revoke_identity_evidence(
+        authentication.evidence_id,
+        now=START + timedelta(seconds=1),
+    )
+
+    revoked = manager.repository.get_by_session_id(credentials.session.session_id)
+    assert revoked.status == "REVOKED"
+    assert revoked.active_profile_id is None
+    assert manager.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.REVOKED
+    assert manager.resolve(credentials.session_token, now=START + timedelta(seconds=2)) is None
+    assert manager.rotate(credentials.session_token, now=START + timedelta(seconds=2)) is None
+    assert manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "replayed-proof",
+        now=START + timedelta(seconds=2),
+    ) is None
+
+    restarted = SessionManager(sqlite_repository(database_path), policy)
+    assert restarted.resolve(credentials.session_token, now=START + timedelta(seconds=3)) is None
+    assert restarted.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.REVOKED
+    assert restarted.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "replayed-after-restart",
+        now=START + timedelta(seconds=3),
+    ) is None
+
+
+def test_session_revocation_revokes_evidence_and_superseded_evidence_cannot_rotate():
+    manager, repository = make_manager()
+    account = AccountIdentity.generate()
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+    credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "proof",
+        now=START,
+    )
+    assert credentials is not None
+    assert manager.revoke(credentials.session.session_id, now=START + timedelta(seconds=1))
+    assert manager.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.REVOKED
+    assert manager.resolve(credentials.session_token, now=START + timedelta(seconds=2)) is None
+
+    second_evidence = AuthenticationContext(START, START + timedelta(minutes=5))
+    second_credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, second_evidence),
+        "fresh-proof",
+        now=START,
+    )
+    assert second_credentials is not None
+    assert manager.supersede_identity_evidence(
+        second_evidence.evidence_id,
+        now=START + timedelta(seconds=1),
+    )
+    assert manager.identity_evidence_state(second_evidence.evidence_id) is IdentityEvidenceState.SUPERSEDED
+    assert repository.get_by_session_id(second_credentials.session.session_id).status == "REVOKED"
+    assert manager.rotate(
+        second_credentials.session_token,
+        now=START + timedelta(seconds=2),
+    ) is None
+
+
+def test_expired_evidence_is_terminal_after_restart_and_rotation_fails(tmp_path):
+    database_path = tmp_path / "expired-evidence.sqlite3"
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    account = AccountIdentity.generate()
+    authentication = AuthenticationContext(START, START + timedelta(seconds=5))
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "proof",
+        now=START,
+    )
+    assert credentials is not None
+
+    assert manager.rotate(
+        credentials.session_token,
+        now=START + timedelta(seconds=5),
+    ) is None
+    assert manager.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.EXPIRED
+    assert manager.repository.get_by_session_id(credentials.session.session_id).status == "EXPIRED"
+
+    restarted = SessionManager(sqlite_repository(database_path), policy)
+    assert restarted.resolve(credentials.session_token, now=START + timedelta(seconds=6)) is None
+    assert restarted.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.EXPIRED
+
+
+def test_concurrent_evidence_revocation_and_rotation_leave_no_active_session(tmp_path):
+    database_path = tmp_path / "concurrent-revocation.sqlite3"
+    policy = SessionPolicy(idle_timeout_seconds=10, absolute_timeout_seconds=30)
+    account = AccountIdentity.generate()
+    authentication = AuthenticationContext(START, START + timedelta(minutes=5))
+    manager = SessionManager(sqlite_repository(database_path), policy)
+    revoker = SessionManager(sqlite_repository(database_path), policy)
+    credentials = manager.create_identity_session(
+        fixed_identity_resolver(account, authentication),
+        "proof",
+        now=START,
+    )
+    assert credentials is not None
+    barrier = threading.Barrier(2)
+
+    def rotate():
+        barrier.wait()
+        return manager.rotate(credentials.session_token, now=START + timedelta(seconds=1))
+
+    def revoke():
+        barrier.wait()
+        return revoker.revoke_identity_evidence(
+            authentication.evidence_id,
+            now=START + timedelta(seconds=1),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rotation = executor.submit(rotate)
+        revocation = executor.submit(revoke)
+        rotated = rotation.result()
+        assert revocation.result()
+
+    assert revoker.identity_evidence_state(authentication.evidence_id) is IdentityEvidenceState.REVOKED
+    assert manager.resolve(credentials.session_token, now=START + timedelta(seconds=2)) is None
+    if rotated is not None:
+        assert manager.resolve(rotated.session_token, now=START + timedelta(seconds=2)) is None
+        assert manager.repository.get_by_session_id(rotated.session.session_id).status == "REVOKED"
+
+
+def test_malformed_identity_evidence_identifier_is_rejected():
+    non_v4_identifier = UUID("00000000-0000-1000-8000-000000000001")
+    with pytest.raises(ValueError):
+        AuthenticationContext(
+            START,
+            START + timedelta(minutes=5),
+            non_v4_identifier,
+        )
+
+
+def test_trusted_identity_session_fails_closed_for_missing_forged_expired_or_revoked_evidence():
+    manager, _repository = make_manager()
+    account = AccountIdentity.generate()
+    provider = ProviderIdentity("issuer", "subject-2")
+
+    class Adapter:
+        def verify(self, evidence):
+            if evidence != "valid":
+                return None
+            return VerifiedProviderIdentity(
+                provider,
+                AuthenticationContext(START, START + timedelta(seconds=5)),
+            )
+
+    class Bindings:
+        def find_existing_account(self, identity):
+            return account if identity == provider else None
+
+    resolver = ProviderBoundIdentityResolver(Adapter(), Bindings())
+    assert manager.create_identity_session(None, "valid", now=START) is None
+    assert manager.create_identity_session(resolver, "forged", now=START) is None
+    assert manager.create_identity_session(resolver, "valid", now=START + timedelta(seconds=5)) is None
+    with pytest.raises(ValueError):
+        manager.create_authenticated_session(
+            account.value,
+            TRUSTED_IDENTITY_SOURCE,
+            now=START,
+        )
+
+    credentials = manager.create_identity_session(resolver, "valid", now=START + timedelta(seconds=1))
+    assert credentials is not None
+    assert manager.logout(credentials.session_token, now=START + timedelta(seconds=2))
+    assert manager.resolve_identity(
+        credentials.session_token,
+        now=START + timedelta(seconds=3),
+    ) is None
+
+
+def test_development_principal_cannot_be_used_as_trusted_identity_evidence():
+    manager, _repository = make_manager()
+
+    class DevelopmentResolver:
+        def resolve(self, _evidence, *, now=None):
+            del now
+            return Principal.authenticated_user(uuid4(), "local-development-unverified")
+
+    assert manager.create_identity_session(DevelopmentResolver(), "development-user", now=START) is None
 
 
 def test_rotation_revokes_old_token_and_preserves_user_and_absolute_expiry():

@@ -22,7 +22,15 @@ from pathlib import Path
 from typing import Iterator, Protocol
 from uuid import UUID, uuid4
 
-from PARMAR.identity import Principal
+from PARMAR.identity import Principal, TRUSTED_IDENTITY_SOURCE
+from PARMAR.identity_contracts import (
+    AccountIdentity,
+    AuthenticationContext,
+    AuthenticatedPrincipal,
+    IdentityEvidenceState,
+    TrustedIdentityResolver,
+    authentication_is_current,
+)
 
 SESSION_COOKIE_NAME = "__Host-parmar_session"
 _SESSION_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
@@ -56,6 +64,38 @@ class ServerSession:
     revoked_at: datetime | None = None
     replaced_by: UUID | None = None
     active_profile_id: UUID | None = None
+    account_identity: AccountIdentity | None = None
+    authentication_context: AuthenticationContext | None = None
+    identity_evidence_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if self.account_identity is None:
+            if (
+                self.authentication_context is not None
+                or self.identity_evidence_id is not None
+                or self.authentication_source == TRUSTED_IDENTITY_SOURCE
+            ):
+                raise ValueError("Trusted identity sessions require a canonical account binding.")
+        elif (
+            type(self.account_identity) is not AccountIdentity
+            or type(self.authentication_context) is not AuthenticationContext
+            or self.user_id != self.account_identity.value
+            or self.authentication_source != TRUSTED_IDENTITY_SOURCE
+            or (
+                self.identity_evidence_id is not None
+                and (
+                    type(self.identity_evidence_id) is not UUID
+                    or self.identity_evidence_id != self.authentication_context.evidence_id
+                )
+            )
+            or not (
+                self.authentication_context.authenticated_at
+                <= self.created_at
+                < self.authentication_context.expires_at
+            )
+            or self.absolute_expires_at > self.authentication_context.expires_at
+        ):
+            raise ValueError("Trusted identity session binding is invalid.")
 
 
 @dataclass(frozen=True)
@@ -66,6 +106,15 @@ class SessionCredentials:
     session_token: str = field(repr=False)
 
 
+@dataclass(frozen=True)
+class _IdentityEvidenceRecord:
+    evidence_id: UUID
+    account_identity: AccountIdentity
+    authentication_context: AuthenticationContext
+    state: IdentityEvidenceState
+    session_id: UUID
+
+
 class SessionStorageUnavailable(RuntimeError):
     """Raised when persistent authenticated session storage is unavailable."""
 
@@ -74,6 +123,8 @@ class SessionRepository(Protocol):
     """Atomic persistence operations required by the session manager."""
 
     def create(self, session: ServerSession, token_hash: str) -> None: ...
+
+    def create_identity(self, session: ServerSession, token_hash: str) -> bool: ...
 
     def get_by_token_hash(self, token_hash: str) -> ServerSession | None: ...
 
@@ -87,6 +138,18 @@ class SessionRepository(Protocol):
     ) -> ServerSession | None: ...
 
     def revoke(self, session_id: UUID, now: datetime) -> bool: ...
+
+    def revoke_identity_evidence(
+        self,
+        evidence_id: UUID,
+        now: datetime,
+        state: IdentityEvidenceState,
+    ) -> bool: ...
+
+    def get_identity_evidence_state(
+        self,
+        evidence_id: UUID,
+    ) -> IdentityEvidenceState | None: ...
 
     def select_profile(
         self,
@@ -112,13 +175,92 @@ class InMemorySessionRepository:
         self._lock = threading.RLock()
         self._sessions: dict[UUID, ServerSession] = {}
         self._token_sessions: dict[str, UUID] = {}
+        self._identity_evidence: dict[UUID, _IdentityEvidenceRecord] = {}
 
     def create(self, session: ServerSession, token_hash: str) -> None:
         with self._lock:
-            if session.session_id in self._sessions or token_hash in self._token_sessions:
+            if (
+                session.account_identity is not None
+                or session.session_id in self._sessions
+                or token_hash in self._token_sessions
+            ):
                 raise ValueError("Session identifier collision.")
             self._sessions[session.session_id] = session
             self._token_sessions[token_hash] = session.session_id
+
+    @staticmethod
+    def _identity_record_matches(
+        session: ServerSession,
+        record: _IdentityEvidenceRecord | None,
+    ) -> bool:
+        return (
+            record is not None
+            and record.state is IdentityEvidenceState.ACTIVE
+            and session.identity_evidence_id == record.evidence_id
+            and session.account_identity == record.account_identity
+            and session.authentication_context == record.authentication_context
+            and session.session_id == record.session_id
+        )
+
+    def _terminate_identity_session(
+        self,
+        session: ServerSession,
+        now: datetime,
+        state: IdentityEvidenceState,
+    ) -> None:
+        evidence_id = session.identity_evidence_id
+        record = self._identity_evidence.get(evidence_id) if evidence_id is not None else None
+        if self._identity_record_matches(session, record):
+            self._identity_evidence[evidence_id] = replace(record, state=state)
+        self._sessions[session.session_id] = replace(
+            session,
+            status="EXPIRED" if state is IdentityEvidenceState.EXPIRED else "REVOKED",
+            revoked_at=now if state is not IdentityEvidenceState.EXPIRED else None,
+            active_profile_id=None,
+        )
+
+    def create_identity(self, session: ServerSession, token_hash: str) -> bool:
+        if (
+            not isinstance(session, ServerSession)
+            or session.account_identity is None
+            or session.authentication_context is None
+            or session.identity_evidence_id is None
+            or session.status != "ACTIVE"
+            or not isinstance(token_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", token_hash)
+        ):
+            return False
+        with self._lock:
+            if (
+                session.session_id in self._sessions
+                or token_hash in self._token_sessions
+                or session.identity_evidence_id in self._identity_evidence
+                or not authentication_is_current(
+                    session.authentication_context,
+                    now=session.created_at,
+                )
+            ):
+                return False
+            self._sessions[session.session_id] = session
+            self._token_sessions[token_hash] = session.session_id
+            self._identity_evidence[session.identity_evidence_id] = _IdentityEvidenceRecord(
+                session.identity_evidence_id,
+                session.account_identity,
+                session.authentication_context,
+                IdentityEvidenceState.ACTIVE,
+                session.session_id,
+            )
+            return True
+
+    def get_identity_evidence_state(
+        self,
+        evidence_id: UUID,
+    ) -> IdentityEvidenceState | None:
+        if type(evidence_id) is not UUID:
+            return None
+        with self._lock:
+            record = self._identity_evidence.get(evidence_id)
+            return record.state if record is not None else None
 
     def get_by_token_hash(self, token_hash: str) -> ServerSession | None:
         with self._lock:
@@ -140,12 +282,36 @@ class InMemorySessionRepository:
             session = self._sessions.get(session_id) if session_id is not None else None
             if session is None or session.status != "ACTIVE":
                 return None
+            if session.account_identity is not None:
+                record = self._identity_evidence.get(session.identity_evidence_id)
+                if not self._identity_record_matches(session, record):
+                    self._sessions[session.session_id] = replace(
+                        session,
+                        status="REVOKED",
+                        revoked_at=now,
+                        active_profile_id=None,
+                    )
+                    return None
+                if not authentication_is_current(session.authentication_context, now=now):
+                    self._terminate_identity_session(
+                        session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                    return None
             if now >= session.idle_expires_at or now >= session.absolute_expires_at:
-                self._sessions[session.session_id] = replace(
-                    session,
-                    status="EXPIRED",
-                    active_profile_id=None,
-                )
+                if session.account_identity is not None:
+                    self._terminate_identity_session(
+                        session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                else:
+                    self._sessions[session.session_id] = replace(
+                        session,
+                        status="EXPIRED",
+                        active_profile_id=None,
+                    )
                 return None
             next_idle_expiry = min(
                 now + timedelta(seconds=idle_timeout_seconds),
@@ -164,7 +330,48 @@ class InMemorySessionRepository:
             session = self._sessions.get(session_id)
             if session is None or session.status != "ACTIVE":
                 return False
+            if session.account_identity is not None:
+                record = self._identity_evidence.get(session.identity_evidence_id)
+                if self._identity_record_matches(session, record):
+                    self._identity_evidence[session.identity_evidence_id] = replace(
+                        record,
+                        state=IdentityEvidenceState.REVOKED,
+                    )
             self._sessions[session_id] = replace(
+                session,
+                status="REVOKED",
+                revoked_at=now,
+                active_profile_id=None,
+            )
+            return True
+
+    def revoke_identity_evidence(
+        self,
+        evidence_id: UUID,
+        now: datetime,
+        state: IdentityEvidenceState,
+    ) -> bool:
+        if (
+            type(state) is not IdentityEvidenceState
+            or state not in (IdentityEvidenceState.REVOKED, IdentityEvidenceState.SUPERSEDED)
+        ):
+            return False
+        with self._lock:
+            record = self._identity_evidence.get(evidence_id)
+            if record is None or record.state is not IdentityEvidenceState.ACTIVE:
+                return False
+            session = self._sessions.get(record.session_id)
+            if session is None or not self._identity_record_matches(session, record):
+                return False
+            if not authentication_is_current(record.authentication_context, now=now):
+                self._terminate_identity_session(
+                    session,
+                    now,
+                    IdentityEvidenceState.EXPIRED,
+                )
+                return False
+            self._identity_evidence[evidence_id] = replace(record, state=state)
+            self._sessions[session.session_id] = replace(
                 session,
                 status="REVOKED",
                 revoked_at=now,
@@ -181,13 +388,30 @@ class InMemorySessionRepository:
     ) -> ServerSession | None:
         with self._lock:
             session = self._sessions.get(session_id)
-            if (
-                session is None
-                or session.user_id != user_id
-                or session.status != "ACTIVE"
-                or now >= session.idle_expires_at
-                or now >= session.absolute_expires_at
-            ):
+            if session is None or session.user_id != user_id or session.status != "ACTIVE":
+                return None
+            if session.account_identity is not None:
+                record = self._identity_evidence.get(session.identity_evidence_id)
+                if not self._identity_record_matches(session, record):
+                    self._sessions[session.session_id] = replace(
+                        session,
+                        status="REVOKED",
+                        revoked_at=now,
+                        active_profile_id=None,
+                    )
+                    return None
+                if (
+                    now >= session.idle_expires_at
+                    or now >= session.absolute_expires_at
+                    or not authentication_is_current(session.authentication_context, now=now)
+                ):
+                    self._terminate_identity_session(
+                        session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                    return None
+            elif now >= session.idle_expires_at or now >= session.absolute_expires_at:
                 return None
             updated = replace(session, active_profile_id=profile_id)
             self._sessions[session_id] = updated
@@ -203,14 +427,44 @@ class InMemorySessionRepository:
         with self._lock:
             old_session_id = self._token_sessions.get(old_token_hash)
             old_session = self._sessions.get(old_session_id) if old_session_id is not None else None
+            evidence_record = (
+                self._identity_evidence.get(old_session.identity_evidence_id)
+                if old_session is not None and old_session.identity_evidence_id is not None
+                else None
+            )
             if (
                 old_session is None
                 or old_session.status != "ACTIVE"
                 or now >= old_session.idle_expires_at
                 or now >= old_session.absolute_expires_at
+                or replacement.user_id != old_session.user_id
+                or replacement.account_identity != old_session.account_identity
+                or replacement.authentication_context != old_session.authentication_context
+                or replacement.identity_evidence_id != old_session.identity_evidence_id
+                or replacement.authentication_source != old_session.authentication_source
+                or replacement.absolute_expires_at != old_session.absolute_expires_at
+                or replacement.status != "ACTIVE"
                 or replacement.session_id in self._sessions
                 or new_token_hash in self._token_sessions
             ):
+                return None
+            if old_session.account_identity is not None and (
+                not self._identity_record_matches(old_session, evidence_record)
+                or not authentication_is_current(old_session.authentication_context, now=now)
+            ):
+                if self._identity_record_matches(old_session, evidence_record):
+                    self._terminate_identity_session(
+                        old_session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                else:
+                    self._sessions[old_session.session_id] = replace(
+                        old_session,
+                        status="REVOKED",
+                        revoked_at=now,
+                        active_profile_id=None,
+                    )
                 return None
             self._sessions[old_session.session_id] = replace(
                 old_session,
@@ -221,13 +475,18 @@ class InMemorySessionRepository:
             )
             self._sessions[replacement.session_id] = replacement
             self._token_sessions[new_token_hash] = replacement.session_id
+            if evidence_record is not None:
+                self._identity_evidence[old_session.identity_evidence_id] = replace(
+                    evidence_record,
+                    session_id=replacement.session_id,
+                )
             return replacement
 
 
 class SQLiteSessionRepository:
     """SQLite-backed local session store with atomic expiry and rotation."""
 
-    _SCHEMA_VERSION = 2
+    _SCHEMA_VERSION = 4
 
     def __init__(self, database_path: str | Path, *, integrity_key: bytes) -> None:
         path = Path(database_path).expanduser()
@@ -286,13 +545,76 @@ class SQLiteSessionRepository:
             session.revoked_at.isoformat() if session.revoked_at is not None else None,
             str(session.replaced_by) if session.replaced_by is not None else None,
         ]
-        if session.active_profile_id is None:
+        if session.account_identity is not None:
+            if session.active_profile_id is not None:
+                payload.append(str(session.active_profile_id))
+            payload.append(session.account_identity.serialize())
+            payload.extend((
+                session.authentication_context.authenticated_at.isoformat(),
+                session.authentication_context.expires_at.isoformat(),
+            ))
+            if session.identity_evidence_id is None:
+                prefix = b"PARMAR-SESSION-RECORD-v3:"
+            else:
+                payload.append(str(session.identity_evidence_id))
+                prefix = b"PARMAR-SESSION-RECORD-v4:"
+        elif session.active_profile_id is None:
             prefix = b"PARMAR-SESSION-RECORD-v1:"
         else:
             payload.append(str(session.active_profile_id))
             prefix = b"PARMAR-SESSION-RECORD-v2:"
         message = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         return hmac.new(key, prefix + message, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _identity_evidence_integrity_tag(
+        record: _IdentityEvidenceRecord,
+        key: bytes,
+    ) -> str:
+        payload = [
+            str(record.evidence_id),
+            record.account_identity.serialize(),
+            record.authentication_context.authenticated_at.isoformat(),
+            record.authentication_context.expires_at.isoformat(),
+            record.state.value,
+            str(record.session_id),
+        ]
+        message = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return hmac.new(
+            key,
+            b"PARMAR-IDENTITY-EVIDENCE-v1:" + message,
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _identity_evidence_from_row(self, row: sqlite3.Row) -> _IdentityEvidenceRecord:
+        try:
+            evidence_id = UUID(row["evidence_id"])
+            record = _IdentityEvidenceRecord(
+                evidence_id=evidence_id,
+                account_identity=AccountIdentity.parse(row["account_identity"]),
+                authentication_context=AuthenticationContext(
+                    self._timestamp(row["authenticated_at"]),
+                    self._timestamp(row["expires_at"]),
+                    evidence_id,
+                ),
+                state=IdentityEvidenceState(row["state"]),
+                session_id=UUID(row["session_id"]),
+            )
+            if (
+                evidence_id.version != 4
+                or not isinstance(row["integrity_tag"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", row["integrity_tag"])
+                or not hmac.compare_digest(
+                    self._identity_evidence_integrity_tag(record, self._integrity_key),
+                    row["integrity_tag"],
+                )
+            ):
+                raise ValueError("Invalid stored identity evidence.")
+            return record
+        except (KeyError, TypeError, ValueError) as error:
+            raise SessionStorageUnavailable(
+                "Authenticated session storage is unavailable."
+            ) from error
 
     def _session_from_row(self, row: sqlite3.Row) -> ServerSession:
         try:
@@ -324,6 +646,28 @@ class SQLiteSessionRepository:
                 active_profile_id=(
                     UUID(row["active_profile_id"]) if row["active_profile_id"] else None
                 ),
+                account_identity=(
+                    AccountIdentity.parse(row["account_identity"])
+                    if row["account_identity"] is not None
+                    else None
+                ),
+                authentication_context=(
+                    AuthenticationContext(
+                        self._timestamp(row["identity_authenticated_at"]),
+                        self._timestamp(row["identity_expires_at"]),
+                        UUID(row["identity_evidence_id"])
+                        if row["identity_evidence_id"] is not None
+                        else uuid4(),
+                    )
+                    if row["identity_authenticated_at"] is not None
+                    and row["identity_expires_at"] is not None
+                    else None
+                ),
+                identity_evidence_id=(
+                    UUID(row["identity_evidence_id"])
+                    if row["identity_evidence_id"] is not None
+                    else None
+                ),
             )
             if (
                 session.last_activity_at < session.created_at
@@ -336,6 +680,34 @@ class SQLiteSessionRepository:
                     and (session.revoked_at is not None or session.replaced_by is not None)
                 )
                 or (session.status != "ACTIVE" and session.active_profile_id is not None)
+                or (
+                    session.account_identity is not None
+                    and (
+                        session.account_identity.value != session.user_id
+                        or session.authentication_source != TRUSTED_IDENTITY_SOURCE
+                        or session.authentication_context is None
+                        or (
+                            session.identity_evidence_id is not None
+                            and session.identity_evidence_id
+                            != session.authentication_context.evidence_id
+                        )
+                    )
+                )
+                or (
+                    session.authentication_source == TRUSTED_IDENTITY_SOURCE
+                    and session.account_identity is None
+                )
+                or (
+                    (row["identity_authenticated_at"] is None)
+                    != (row["identity_expires_at"] is None)
+                )
+                or (
+                    session.account_identity is None
+                    and (
+                        row["identity_authenticated_at"] is not None
+                        or row["identity_expires_at"] is not None
+                    )
+                )
             ):
                 raise ValueError("Invalid stored session timestamps.")
             expected_tag = self._session_integrity_tag(session, token_hash, self._integrity_key)
@@ -375,7 +747,7 @@ class SQLiteSessionRepository:
         if self._initialized:
             return
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, self._SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, self._SCHEMA_VERSION):
             raise SessionStorageUnavailable("Authenticated session storage is unavailable.")
         if version == 0:
             if not self._fresh_database:
@@ -392,6 +764,10 @@ class SQLiteSessionRepository:
                     session_id TEXT PRIMARY KEY,
                     token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash) = 64),
                     user_id TEXT NOT NULL,
+                    account_identity TEXT,
+                    identity_authenticated_at TEXT,
+                    identity_expires_at TEXT,
+                    identity_evidence_id TEXT,
                     authentication_source TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     last_activity_at TEXT NOT NULL,
@@ -404,7 +780,16 @@ class SQLiteSessionRepository:
                     integrity_tag TEXT NOT NULL CHECK(length(integrity_tag) = 64)
                 );
                 CREATE INDEX sessions_expiry ON sessions(status, idle_expires_at, absolute_expires_at);
-                PRAGMA user_version = 2;
+                CREATE TABLE identity_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    account_identity TEXT NOT NULL,
+                    authenticated_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('ACTIVE', 'EXPIRED', 'REVOKED', 'SUPERSEDED')),
+                    session_id TEXT NOT NULL,
+                    integrity_tag TEXT NOT NULL CHECK(length(integrity_tag) = 64)
+                );
+                PRAGMA user_version = 4;
                 """
             )
         elif version == 1:
@@ -412,6 +797,62 @@ class SQLiteSessionRepository:
             try:
                 connection.execute("ALTER TABLE sessions ADD COLUMN active_profile_id TEXT")
                 connection.execute("PRAGMA user_version = 2")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            version = 2
+        if version == 2:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("ALTER TABLE sessions ADD COLUMN account_identity TEXT")
+                connection.execute("ALTER TABLE sessions ADD COLUMN identity_authenticated_at TEXT")
+                connection.execute("ALTER TABLE sessions ADD COLUMN identity_expires_at TEXT")
+                connection.execute("PRAGMA user_version = 3")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            version = 3
+        if version == 3:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("ALTER TABLE sessions ADD COLUMN identity_evidence_id TEXT")
+                connection.execute(
+                    "CREATE TABLE identity_evidence ("
+                    "evidence_id TEXT PRIMARY KEY, account_identity TEXT NOT NULL, "
+                    "authenticated_at TEXT NOT NULL, expires_at TEXT NOT NULL, "
+                    "state TEXT NOT NULL CHECK(state IN "
+                    "('ACTIVE', 'EXPIRED', 'REVOKED', 'SUPERSEDED')), "
+                    "session_id TEXT NOT NULL, "
+                    "integrity_tag TEXT NOT NULL CHECK(length(integrity_tag) = 64))"
+                )
+                rows = connection.execute(
+                    "SELECT * FROM sessions WHERE authentication_source = ? AND status = 'ACTIVE'",
+                    (TRUSTED_IDENTITY_SOURCE,),
+                ).fetchall()
+                for row in rows:
+                    old_session = self._session_from_row(row)
+                    revoked = replace(
+                        old_session,
+                        status="REVOKED",
+                        revoked_at=datetime.now(timezone.utc),
+                        active_profile_id=None,
+                    )
+                    connection.execute(
+                        "UPDATE sessions SET status = 'REVOKED', revoked_at = ?, "
+                        "active_profile_id = NULL, integrity_tag = ? WHERE session_id = ?",
+                        (
+                            revoked.revoked_at.isoformat(),
+                            self._session_integrity_tag(
+                                revoked,
+                                row["token_hash"],
+                                self._integrity_key,
+                            ),
+                            str(revoked.session_id),
+                        ),
+                    )
+                connection.execute("PRAGMA user_version = 4")
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -427,6 +868,8 @@ class SQLiteSessionRepository:
         }
         if "sessions" not in tables:
             raise SessionStorageUnavailable("Authenticated session storage is unavailable.")
+        if "identity_evidence" not in tables:
+            raise SessionStorageUnavailable("Authenticated session storage is unavailable.")
         columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -435,6 +878,10 @@ class SQLiteSessionRepository:
             "session_id",
             "token_hash",
             "user_id",
+            "account_identity",
+            "identity_authenticated_at",
+            "identity_expires_at",
+            "identity_evidence_id",
             "authentication_source",
             "created_at",
             "last_activity_at",
@@ -483,6 +930,22 @@ class SQLiteSessionRepository:
         return (
             str(session.session_id),
             str(session.user_id),
+            session.account_identity.serialize() if session.account_identity is not None else None,
+            (
+                session.authentication_context.authenticated_at.isoformat()
+                if session.authentication_context is not None
+                else None
+            ),
+            (
+                session.authentication_context.expires_at.isoformat()
+                if session.authentication_context is not None
+                else None
+            ),
+            (
+                str(session.identity_evidence_id)
+                if session.identity_evidence_id is not None
+                else None
+            ),
             session.authentication_source,
             session.created_at.isoformat(),
             session.last_activity_at.isoformat(),
@@ -497,21 +960,182 @@ class SQLiteSessionRepository:
     def create(self, session: ServerSession, token_hash: str) -> None:
         if (
             not isinstance(session, ServerSession)
+            or session.account_identity is not None
             or not isinstance(token_hash, str)
             or not re.fullmatch(r"[0-9a-f]{64}", token_hash)
         ):
             raise ValueError("Invalid session record.")
         with self._connection(write=True) as connection:
             connection.execute(
-                "INSERT INTO sessions(session_id, user_id, authentication_source, created_at, "
+                "INSERT INTO sessions(session_id, user_id, account_identity, identity_authenticated_at, "
+                "identity_expires_at, identity_evidence_id, authentication_source, created_at, "
                 "last_activity_at, idle_expires_at, absolute_expires_at, status, revoked_at, "
                 "replaced_by, active_profile_id, token_hash, integrity_tag) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     *self._session_values(session),
                     token_hash,
                     self._session_integrity_tag(session, token_hash, self._integrity_key),
                 ),
+            )
+
+    def create_identity(self, session: ServerSession, token_hash: str) -> bool:
+        if (
+            not isinstance(session, ServerSession)
+            or session.account_identity is None
+            or session.authentication_context is None
+            or session.identity_evidence_id is None
+            or session.status != "ACTIVE"
+            or not isinstance(token_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", token_hash)
+            or not authentication_is_current(
+                session.authentication_context,
+                now=session.created_at,
+            )
+        ):
+            return False
+        evidence = _IdentityEvidenceRecord(
+            session.identity_evidence_id,
+            session.account_identity,
+            session.authentication_context,
+            IdentityEvidenceState.ACTIVE,
+            session.session_id,
+        )
+        with self._connection(write=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM identity_evidence WHERE evidence_id = ?",
+                (str(evidence.evidence_id),),
+            ).fetchone() is not None:
+                return False
+            if connection.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ? OR token_hash = ?",
+                (str(session.session_id), token_hash),
+            ).fetchone() is not None:
+                return False
+            connection.execute(
+                "INSERT INTO sessions(session_id, user_id, account_identity, identity_authenticated_at, "
+                "identity_expires_at, identity_evidence_id, authentication_source, created_at, "
+                "last_activity_at, idle_expires_at, absolute_expires_at, status, revoked_at, "
+                "replaced_by, active_profile_id, token_hash, integrity_tag) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    *self._session_values(session),
+                    token_hash,
+                    self._session_integrity_tag(session, token_hash, self._integrity_key),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO identity_evidence(evidence_id, account_identity, authenticated_at, "
+                "expires_at, state, session_id, integrity_tag) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(evidence.evidence_id),
+                    evidence.account_identity.serialize(),
+                    evidence.authentication_context.authenticated_at.isoformat(),
+                    evidence.authentication_context.expires_at.isoformat(),
+                    evidence.state.value,
+                    str(evidence.session_id),
+                    self._identity_evidence_integrity_tag(evidence, self._integrity_key),
+                ),
+            )
+            return True
+
+    def _active_evidence_for_session(
+        self,
+        connection: sqlite3.Connection,
+        session: ServerSession,
+    ) -> _IdentityEvidenceRecord | None:
+        if session.identity_evidence_id is None:
+            return None
+        row = connection.execute(
+            "SELECT * FROM identity_evidence WHERE evidence_id = ?",
+            (str(session.identity_evidence_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        record = self._identity_evidence_from_row(row)
+        if (
+            record.state is not IdentityEvidenceState.ACTIVE
+            or record.evidence_id != session.identity_evidence_id
+            or record.account_identity != session.account_identity
+            or record.authentication_context != session.authentication_context
+            or record.session_id != session.session_id
+        ):
+            return None
+        return record
+
+    def _write_evidence_state(
+        self,
+        connection: sqlite3.Connection,
+        record: _IdentityEvidenceRecord,
+        state: IdentityEvidenceState,
+        *,
+        session_id: UUID | None = None,
+    ) -> _IdentityEvidenceRecord:
+        updated = replace(
+            record,
+            state=state,
+            session_id=session_id if session_id is not None else record.session_id,
+        )
+        connection.execute(
+            "UPDATE identity_evidence SET state = ?, session_id = ?, integrity_tag = ? "
+            "WHERE evidence_id = ?",
+            (
+                updated.state.value,
+                str(updated.session_id),
+                self._identity_evidence_integrity_tag(updated, self._integrity_key),
+                str(updated.evidence_id),
+            ),
+        )
+        return updated
+
+    def _terminate_identity_session(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        session: ServerSession,
+        now: datetime,
+        state: IdentityEvidenceState,
+    ) -> None:
+        record = self._active_evidence_for_session(connection, session)
+        if record is not None:
+            self._write_evidence_state(connection, record, state)
+        expired = state is IdentityEvidenceState.EXPIRED
+        terminal = replace(
+            session,
+            status="EXPIRED" if expired else "REVOKED",
+            revoked_at=None if expired else now,
+            active_profile_id=None,
+        )
+        connection.execute(
+            "UPDATE sessions SET status = ?, revoked_at = ?, active_profile_id = NULL, "
+            "integrity_tag = ? WHERE session_id = ? AND status = 'ACTIVE'",
+            (
+                terminal.status,
+                terminal.revoked_at.isoformat() if terminal.revoked_at else None,
+                self._session_integrity_tag(
+                    terminal,
+                    row["token_hash"],
+                    self._integrity_key,
+                ),
+                str(session.session_id),
+            ),
+        )
+
+    def get_identity_evidence_state(
+        self,
+        evidence_id: UUID,
+    ) -> IdentityEvidenceState | None:
+        if type(evidence_id) is not UUID:
+            return None
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM identity_evidence WHERE evidence_id = ?",
+                (str(evidence_id),),
+            ).fetchone()
+            return (
+                self._identity_evidence_from_row(row).state
+                if row is not None
+                else None
             )
 
     def get_by_token_hash(self, token_hash: str) -> ServerSession | None:
@@ -552,16 +1176,45 @@ class SQLiteSessionRepository:
             session = self._session_from_row(row)
             if session.status != "ACTIVE":
                 return None
+            if session.account_identity is not None:
+                evidence = self._active_evidence_for_session(connection, session)
+                if evidence is None:
+                    self._terminate_identity_session(
+                        connection,
+                        row,
+                        session,
+                        now,
+                        IdentityEvidenceState.REVOKED,
+                    )
+                    return None
+                if not authentication_is_current(session.authentication_context, now=now):
+                    self._terminate_identity_session(
+                        connection,
+                        row,
+                        session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                    return None
             if now >= session.idle_expires_at or now >= session.absolute_expires_at:
-                expired = replace(session, status="EXPIRED", active_profile_id=None)
-                connection.execute(
-                    "UPDATE sessions SET status = 'EXPIRED', active_profile_id = NULL, integrity_tag = ? "
-                    "WHERE session_id = ?",
-                    (
-                        self._session_integrity_tag(expired, row["token_hash"], self._integrity_key),
-                        str(session.session_id),
-                    ),
-                )
+                if session.account_identity is not None:
+                    self._terminate_identity_session(
+                        connection,
+                        row,
+                        session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                else:
+                    expired = replace(session, status="EXPIRED", active_profile_id=None)
+                    connection.execute(
+                        "UPDATE sessions SET status = 'EXPIRED', active_profile_id = NULL, integrity_tag = ? "
+                        "WHERE session_id = ?",
+                        (
+                            self._session_integrity_tag(expired, row["token_hash"], self._integrity_key),
+                            str(session.session_id),
+                        ),
+                    )
                 return None
             updated_idle_expiry = min(
                 now + timedelta(seconds=idle_timeout_seconds),
@@ -604,6 +1257,14 @@ class SQLiteSessionRepository:
             session = self._session_from_row(row)
             if session.status != "ACTIVE":
                 return False
+            if session.account_identity is not None:
+                evidence = self._active_evidence_for_session(connection, session)
+                if evidence is not None:
+                    self._write_evidence_state(
+                        connection,
+                        evidence,
+                        IdentityEvidenceState.REVOKED,
+                    )
             revoked = replace(session, status="REVOKED", revoked_at=now, active_profile_id=None)
             cursor = connection.execute(
                 "UPDATE sessions SET status = 'REVOKED', revoked_at = ?, active_profile_id = NULL, integrity_tag = ? "
@@ -615,6 +1276,73 @@ class SQLiteSessionRepository:
                 ),
             )
             return cursor.rowcount == 1
+
+    def revoke_identity_evidence(
+        self,
+        evidence_id: UUID,
+        now: datetime,
+        state: IdentityEvidenceState,
+    ) -> bool:
+        if (
+            type(evidence_id) is not UUID
+            or type(state) is not IdentityEvidenceState
+            or state not in (IdentityEvidenceState.REVOKED, IdentityEvidenceState.SUPERSEDED)
+        ):
+            return False
+        with self._connection(write=True) as connection:
+            evidence_row = connection.execute(
+                "SELECT * FROM identity_evidence WHERE evidence_id = ?",
+                (str(evidence_id),),
+            ).fetchone()
+            if evidence_row is None:
+                return False
+            evidence = self._identity_evidence_from_row(evidence_row)
+            if evidence.state is not IdentityEvidenceState.ACTIVE:
+                return False
+            session_row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (str(evidence.session_id),),
+            ).fetchone()
+            if session_row is None:
+                return False
+            session = self._session_from_row(session_row)
+            if (
+                session.status != "ACTIVE"
+                or session.identity_evidence_id != evidence_id
+                or session.account_identity != evidence.account_identity
+                or session.authentication_context != evidence.authentication_context
+            ):
+                return False
+            if not authentication_is_current(evidence.authentication_context, now=now):
+                self._terminate_identity_session(
+                    connection,
+                    session_row,
+                    session,
+                    now,
+                    IdentityEvidenceState.EXPIRED,
+                )
+                return False
+            self._write_evidence_state(connection, evidence, state)
+            revoked = replace(
+                session,
+                status="REVOKED",
+                revoked_at=now,
+                active_profile_id=None,
+            )
+            connection.execute(
+                "UPDATE sessions SET status = 'REVOKED', revoked_at = ?, active_profile_id = NULL, "
+                "integrity_tag = ? WHERE session_id = ? AND status = 'ACTIVE'",
+                (
+                    now.isoformat(),
+                    self._session_integrity_tag(
+                        revoked,
+                        session_row["token_hash"],
+                        self._integrity_key,
+                    ),
+                    str(session.session_id),
+                ),
+            )
+            return True
 
     def select_profile(
         self,
@@ -636,9 +1364,33 @@ class SQLiteSessionRepository:
             if (
                 session.user_id != user_id
                 or session.status != "ACTIVE"
-                or now >= session.idle_expires_at
-                or now >= session.absolute_expires_at
             ):
+                return None
+            if session.account_identity is not None:
+                evidence = self._active_evidence_for_session(connection, session)
+                if evidence is None:
+                    self._terminate_identity_session(
+                        connection,
+                        row,
+                        session,
+                        now,
+                        IdentityEvidenceState.REVOKED,
+                    )
+                    return None
+                if (
+                    now >= session.idle_expires_at
+                    or now >= session.absolute_expires_at
+                    or not authentication_is_current(session.authentication_context, now=now)
+                ):
+                    self._terminate_identity_session(
+                        connection,
+                        row,
+                        session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
+                    return None
+            elif now >= session.idle_expires_at or now >= session.absolute_expires_at:
                 return None
             updated = replace(session, active_profile_id=profile_id)
             connection.execute(
@@ -674,16 +1426,40 @@ class SQLiteSessionRepository:
             if row is None:
                 return None
             old_session = self._session_from_row(row)
+            evidence = (
+                self._active_evidence_for_session(connection, old_session)
+                if old_session.account_identity is not None
+                else None
+            )
             if (
                 old_session.status != "ACTIVE"
                 or now >= old_session.idle_expires_at
                 or now >= old_session.absolute_expires_at
                 or replacement.user_id != old_session.user_id
+                or replacement.account_identity != old_session.account_identity
+                or replacement.authentication_context != old_session.authentication_context
+                or replacement.identity_evidence_id != old_session.identity_evidence_id
                 or replacement.authentication_source != old_session.authentication_source
                 or replacement.status != "ACTIVE"
                 or replacement.session_id == old_session.session_id
                 or replacement.absolute_expires_at != old_session.absolute_expires_at
             ):
+                return None
+            if old_session.account_identity is not None and (
+                evidence is None
+                or not authentication_is_current(
+                    old_session.authentication_context,
+                    now=now,
+                )
+            ):
+                if evidence is not None:
+                    self._terminate_identity_session(
+                        connection,
+                        row,
+                        old_session,
+                        now,
+                        IdentityEvidenceState.EXPIRED,
+                    )
                 return None
             revoked = replace(
                 old_session,
@@ -706,16 +1482,24 @@ class SQLiteSessionRepository:
             if cursor.rowcount != 1:
                 return None
             connection.execute(
-                "INSERT INTO sessions(session_id, user_id, authentication_source, created_at, "
+                "INSERT INTO sessions(session_id, user_id, account_identity, identity_authenticated_at, "
+                "identity_expires_at, identity_evidence_id, authentication_source, created_at, "
                 "last_activity_at, idle_expires_at, absolute_expires_at, status, revoked_at, "
                 "replaced_by, active_profile_id, token_hash, integrity_tag) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     *self._session_values(replacement),
                     new_token_hash,
                     self._session_integrity_tag(replacement, new_token_hash, self._integrity_key),
                 ),
             )
+            if evidence is not None:
+                self._write_evidence_state(
+                    connection,
+                    evidence,
+                    IdentityEvidenceState.ACTIVE,
+                    session_id=replacement.session_id,
+                )
             return replacement
 
 
@@ -731,10 +1515,13 @@ class SessionManager:
     ) -> None:
         required_methods = (
             "create",
+            "create_identity",
             "get_by_token_hash",
             "get_by_session_id",
             "resolve_and_touch",
             "revoke",
+            "revoke_identity_evidence",
+            "get_identity_evidence_state",
             "select_profile",
             "rotate",
         )
@@ -766,6 +1553,8 @@ class SessionManager:
         *,
         now: datetime | None = None,
     ) -> SessionCredentials:
+        if authentication_source == TRUSTED_IDENTITY_SOURCE:
+            raise ValueError("Canonical identity sessions require trusted identity resolution.")
         principal = Principal.authenticated_user(user_id, authentication_source)
         current = self._now(now)
         absolute_expiry = current + timedelta(seconds=self.policy.absolute_timeout_seconds)
@@ -787,6 +1576,106 @@ class SessionManager:
             raise RuntimeError("Session token generation failed.")
         self.repository.create(session, token_hash)
         return SessionCredentials(session=session, session_token=token)
+
+    def create_identity_session(
+        self,
+        resolver: TrustedIdentityResolver | None,
+        evidence: object,
+        *,
+        now: datetime | None = None,
+    ) -> SessionCredentials | None:
+        """Create a session only from a current, server-resolved account identity."""
+        resolve = getattr(resolver, "resolve", None)
+        if resolver is None or not callable(resolve):
+            return None
+        principal = resolve(evidence, now=self._now(now))
+        current = self._now(now)
+        if (
+            type(principal) is not AuthenticatedPrincipal
+            or not authentication_is_current(principal.authentication, now=current)
+        ):
+            return None
+        absolute_expiry = min(
+            current + timedelta(seconds=self.policy.absolute_timeout_seconds),
+            principal.authentication.expires_at,
+        )
+        session = ServerSession(
+            session_id=uuid4(),
+            user_id=principal.account_identity.value,
+            authentication_source=TRUSTED_IDENTITY_SOURCE,
+            created_at=current,
+            last_activity_at=current,
+            idle_expires_at=min(
+                current + timedelta(seconds=self.policy.idle_timeout_seconds),
+                absolute_expiry,
+            ),
+            absolute_expires_at=absolute_expiry,
+            account_identity=principal.account_identity,
+            authentication_context=principal.authentication,
+            identity_evidence_id=principal.authentication.evidence_id,
+        )
+        token = secrets.token_urlsafe(32)
+        token_hash = self._token_hash(token)
+        if token_hash is None:
+            raise RuntimeError("Session token generation failed.")
+        if not self.repository.create_identity(session, token_hash):
+            return None
+        return SessionCredentials(session=session, session_token=token)
+
+    def resolve_identity(
+        self,
+        token: object,
+        *,
+        now: datetime | None = None,
+    ) -> AuthenticatedPrincipal | None:
+        """Return the identity bound to this active session, never from request data."""
+        current = self._now(now)
+        session = self.resolve(token, now=current)
+        if (
+            session is None
+            or session.account_identity is None
+            or session.authentication_context is None
+            or not authentication_is_current(session.authentication_context, now=current)
+        ):
+            return None
+        return AuthenticatedPrincipal(
+            session.account_identity,
+            session.authentication_context,
+        )
+
+    def resolve_trusted_session(
+        self,
+        token: object,
+        *,
+        expected_session_id: UUID,
+        expected_account_identity: AccountIdentity,
+        expected_evidence_id: UUID,
+        now: datetime | None = None,
+    ) -> ServerSession | None:
+        """Revalidate the same trusted session/evidence binding at an execution boundary."""
+        if (
+            type(expected_session_id) is not UUID
+            or type(expected_account_identity) is not AccountIdentity
+            or type(expected_evidence_id) is not UUID
+        ):
+            return None
+        session = self.resolve(token, now=now)
+        if (
+            session is None
+            or session.status != "ACTIVE"
+            or session.session_id != expected_session_id
+            or session.account_identity != expected_account_identity
+            or session.user_id != expected_account_identity.value
+            or session.identity_evidence_id != expected_evidence_id
+            or session.authentication_context is None
+            or session.authentication_context.evidence_id != expected_evidence_id
+            or not authentication_is_current(
+                session.authentication_context,
+                now=self._now(now),
+            )
+        ):
+            return None
+        return session
 
     def resolve(self, token: object, *, now: datetime | None = None) -> ServerSession | None:
         token_hash = self._token_hash(token)
@@ -823,6 +1712,9 @@ class SessionManager:
                 old_session.absolute_expires_at,
             ),
             absolute_expires_at=old_session.absolute_expires_at,
+            account_identity=old_session.account_identity,
+            authentication_context=old_session.authentication_context,
+            identity_evidence_id=old_session.identity_evidence_id,
         )
         new_token = secrets.token_urlsafe(32)
         new_token_hash = self._token_hash(new_token)
@@ -840,6 +1732,42 @@ class SessionManager:
 
     def revoke(self, session_id: UUID, *, now: datetime | None = None) -> bool:
         return self.repository.revoke(session_id, self._now(now))
+
+    def revoke_identity_evidence(
+        self,
+        evidence_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        if type(evidence_id) is not UUID:
+            return False
+        return self.repository.revoke_identity_evidence(
+            evidence_id,
+            self._now(now),
+            IdentityEvidenceState.REVOKED,
+        )
+
+    def supersede_identity_evidence(
+        self,
+        evidence_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        if type(evidence_id) is not UUID:
+            return False
+        return self.repository.revoke_identity_evidence(
+            evidence_id,
+            self._now(now),
+            IdentityEvidenceState.SUPERSEDED,
+        )
+
+    def identity_evidence_state(
+        self,
+        evidence_id: UUID,
+    ) -> IdentityEvidenceState | None:
+        if type(evidence_id) is not UUID:
+            return None
+        return self.repository.get_identity_evidence_state(evidence_id)
 
     def select_profile(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import json
-from typing import Any
+from typing import Any, Callable
 
 from PARMAR.chat.readiness import (
     SINGLE_PROVIDER_EXTERNAL,
@@ -40,6 +40,7 @@ class SearchService:
         query: str,
         *,
         authorization: ExternalAuthorization | None = None,
+        execution_check: Callable[[], bool] | None = None,
     ) -> ResearchResult:
         if isinstance(self.provider, UnavailableSearchProvider):
             return ResearchResult(
@@ -66,6 +67,11 @@ class SearchService:
             return ResearchResult(
                 ResearchStatus.BLOCKED,
                 reason_code="INVALID_RESEARCH_QUERY",
+            )
+        if execution_check is not None and execution_check() is not True:
+            return ResearchResult(
+                ResearchStatus.BLOCKED,
+                reason_code="EXECUTION_AUTHORIZATION_DENIED",
             )
 
         try:

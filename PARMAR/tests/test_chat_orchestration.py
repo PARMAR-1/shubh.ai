@@ -363,6 +363,25 @@ def test_multi_model_execution_reports_normalized_agreement_and_independent_inpu
     assert context.safety_status == "SAFE"
 
 
+def test_multi_model_revalidates_authorization_before_each_provider_stage():
+    first = FakeProvider("model-a")
+    second = FakeProvider("model-b")
+    models = [make_model("model-a", "a", first), make_model("model-b", "b", second)]
+    checks = iter((True, False))
+
+    result = make_orchestrator(models).execute_verified_multi_model(
+        "Plan this",
+        safe_context(),
+        candidates=models,
+        execution_check=lambda: next(checks),
+    )
+
+    assert result.failure_state == "EXECUTION_AUTHORIZATION_DENIED"
+    assert len(result.candidates) == 1
+    assert len(first.calls) == 1
+    assert second.calls == []
+
+
 def test_multi_model_disagreement_is_returned_without_choosing_a_winner():
     first = FakeProvider("model-a", "First answer")
     second = FakeProvider("model-b", "Different answer")

@@ -649,7 +649,8 @@ test('Account Settings disclose the production-authentication prerequisite witho
   const accountPanel = html.match(
     /<section class="settings-panel" id="settings-panel-account"[\s\S]*?<\/section>/,
   )?.[0] || '';
-  assert.match(accountPanel, /Profile, billing, and server-backed personal preferences require a production trusted identity provider/);
+  assert.match(accountPanel, /Conversation profiles are scoped to this server session/);
+  assert.match(accountPanel, /Billing and production identity verification require a trusted identity provider, which is not configured/);
   assert.match(accountPanel, /one shared, explicitly unverified identity/);
   assert.doesNotMatch(accountPanel, /name="(?:profile|email|billing|response-style|custom-instructions)"/);
 });
@@ -697,6 +698,8 @@ test('Account Settings report the actual authentication state without implying v
       logoutInProgress: false,
     },
     dom: { settingsAccountState: { textContent: '' } },
+    renderPhoneStatus() {},
+    renderProfileControls() {},
   };
   vm.runInNewContext(
     functionSource('renderAuthenticationControls', 'refreshAuthenticationState'),
@@ -1064,22 +1067,31 @@ test('phone-awareness preference uses the existing server endpoint and reflects 
     phoneStatusLabel: { textContent: '' },
     phonePolicyLabel: { textContent: '' },
   };
-  const state = { settings: { phonePermission: true } };
+  const state = {
+    authMode: 'anonymous',
+    phoneStatusAvailable: true,
+    phoneRequestInProgress: false,
+    settings: { phonePermission: true },
+  };
   const requests = [];
+  const renderedCards = [];
   let persisted = 0;
   const status = {
-    permission: 'REVOKED',
-    current_event: 'NONE',
-    policy_decision: 'BLOCKED',
-    message: 'Simulated events are disabled.',
+    enabled: false,
+    permission: 'OFF',
+    current_event: 'permission_disabled',
+    policy_decision: 'BLOCKED_UNTIL_PERMISSION_GRANTED',
+    message: 'Local simulated phone awareness is enabled and remains separate from real device access.',
   };
   const runtime = {
     dom,
     state,
+    renderPhoneAvailability() {},
+    renderPhoneCards(_container, cards) { renderedCards.push(cards); },
     persistSettings() { persisted += 1; },
     apiRequest: async (...args) => {
       requests.push(args);
-      return { json: async () => ({ status }) };
+      return { ok: true, json: async () => ({ status }) };
     },
     console,
   };
@@ -1092,7 +1104,7 @@ test('phone-awareness preference uses the existing server endpoint and reflects 
   assert.equal(requests[0][0], '/api/phone');
   assert.equal(requests[0][1].method, 'POST');
   assert.deepEqual(JSON.parse(requests[0][1].body), { action: 'toggle_permission', enabled: false });
-  assert.match(dom.phoneBox.innerHTML, /REVOKED/);
+  assert.equal(renderedCards[0][0][1], 'OFF');
   assert.equal(dom.phoneStatusLabel.textContent, 'Permission-gated');
   assert.equal(dom.phonePolicyLabel.textContent, 'Blocked until permission is granted');
 });

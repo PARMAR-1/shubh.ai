@@ -52,13 +52,16 @@ def memory_repository(monkeypatch):
     return repository
 
 
+from PARMAR.tests.identity_test_support import trusted_session
+
+
 @pytest.fixture
 def authenticated_user(monkeypatch, tmp_path):
     manager = SessionManager(
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900),
     )
-    credentials = manager.create_authenticated_session(uuid4(), "conversation-http-test")
+    credentials = trusted_session(manager)
     identity_repository = SQLiteIdentityRepository(tmp_path / "identity.sqlite3")
     profile = identity_repository.create_profile(credentials.session.user_id, "Default")
     selected = manager.select_profile(
@@ -91,6 +94,14 @@ def send_chat(monkeypatch, body, *, authenticated=None):
     )
     futuristic_app.PARMARRequestHandler.do_POST(request)
     return request, response, errors
+
+
+def assert_authenticated_chat_no_go(errors):
+    assert errors == [(
+        503,
+        "Protected operation 'authenticated_chat' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
 
 
 def send_get(path, *, authenticated=None):
@@ -248,9 +259,9 @@ def test_conversation_endpoints_require_active_profile_and_deny_cross_profile_ac
         {"message": "Cross-profile attempt", "conversation_id": str(other_conversation.conversation_id)},
         authenticated=authenticated_user,
     )
-    assert errors == [(404, "Conversation not found")]
+    assert_authenticated_chat_no_go(errors)
 
-    unselected = manager.create_authenticated_session(uuid4(), "conversation-http-test")
+    unselected = trusted_session(manager)
     _request, _listed, errors = send_get(
         "/api/conversations",
         authenticated=(manager, unselected),
@@ -292,27 +303,30 @@ def test_profile_switch_changes_authenticated_conversation_scope_over_http(
         {"profile_id": str(second_profile.profile_id)},
         authenticated=authenticated_user,
     )
-    assert errors == []
-    assert response["status"] == 200
-    assert response["result"]["active_profile"]["profile_id"] == str(second_profile.profile_id)
-    assert manager.resolve(credentials.session_token).active_profile_id == second_profile.profile_id
+    assert response == {}
+    assert errors == [(
+        503,
+        "Protected operation 'session_profile_selection' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
+    assert manager.resolve(credentials.session_token).active_profile_id == first_profile_id
 
     _request, second_list, errors = send_get("/api/conversations", authenticated=authenticated_user)
     assert errors == []
     assert [item["conversation_id"] for item in second_list["result"]["conversations"]] == [
-        str(second_conversation.conversation_id),
+        str(first_conversation.conversation_id),
     ]
-    _request, _first_load, errors = send_get(
+    _request, first_load, errors = send_get(
         f"/api/conversations/{first_conversation.conversation_id}",
         authenticated=authenticated_user,
     )
-    assert errors == [(404, "Conversation not found")]
-    _request, second_load, errors = send_get(
+    assert errors == []
+    assert first_load["result"]["messages"][0]["content"] == "First profile private history"
+    _request, _second_load, errors = send_get(
         f"/api/conversations/{second_conversation.conversation_id}",
         authenticated=authenticated_user,
     )
-    assert errors == []
-    assert second_load["result"]["messages"][0]["content"] == "Second profile private history"
+    assert errors == [(404, "Conversation not found")]
 
 
 def test_authenticated_chat_history_survives_repository_reinitialization(
@@ -338,25 +352,15 @@ def test_authenticated_chat_history_survives_repository_reinitialization(
         {"message": "Persist this request."},
         authenticated=authenticated_user,
     )
-    assert errors == []
-    conversation_id = response["result"]["conversation_id"]
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
 
     restarted_repository = SQLiteConversationRepository(database_path)
     monkeypatch.setattr(futuristic_app, "CONVERSATION_REPOSITORY", restarted_repository)
     monkeypatch.setattr(futuristic_app, "MESSAGE_REPOSITORY", restarted_repository)
     _request, listed, errors = send_get("/api/conversations", authenticated=authenticated_user)
     assert errors == []
-    assert [item["conversation_id"] for item in listed["result"]["conversations"]] == [conversation_id]
-
-    _request, loaded, errors = send_get(
-        f"/api/conversations/{conversation_id}",
-        authenticated=authenticated_user,
-    )
-    assert errors == []
-    assert [message["content"] for message in loaded["result"]["messages"]] == [
-        "Persist this request.",
-        "Persisted released response.",
-    ]
+    assert listed["result"]["conversations"] == []
 
 
 def test_persistent_session_restart_restores_server_user_and_owned_conversation(
@@ -367,7 +371,7 @@ def test_persistent_session_restart_restores_server_user_and_owned_conversation(
     conversation_path = tmp_path / "conversations.sqlite3"
     session_policy = SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900)
     first_manager = SessionManager(sqlite_session_repository(session_path), session_policy)
-    credentials = first_manager.create_authenticated_session(uuid4(), "trusted-test-auth")
+    credentials = trusted_session(first_manager)
     identity_repository = SQLiteIdentityRepository(tmp_path / "identity.sqlite3")
     profile = identity_repository.create_profile(credentials.session.user_id, "Primary")
     selected_session = first_manager.select_profile(
@@ -396,9 +400,8 @@ def test_persistent_session_restart_restores_server_user_and_owned_conversation(
         {"message": "Create an owned conversation."},
         authenticated=(first_manager, credentials),
     )
-    assert errors == []
-    conversation_id = response["result"]["conversation_id"]
-
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
     restarted_manager = SessionManager(sqlite_session_repository(session_path), session_policy)
     restarted_conversations = SQLiteConversationRepository(conversation_path)
     monkeypatch.setattr(futuristic_app, "SESSION_MANAGER", restarted_manager)
@@ -412,17 +415,14 @@ def test_persistent_session_restart_restores_server_user_and_owned_conversation(
     assert session_response["result"]["authenticated"] is True
     assert session_request.request_context.principal.user_id == credentials.session.user_id
 
-    _request, loaded, errors = send_get(
-        f"/api/conversations/{conversation_id}",
-        authenticated=(first_manager, credentials),
+    _request, listed, errors = send_get(
+        "/api/conversations",
+        authenticated=(restarted_manager, credentials),
     )
     assert errors == []
-    assert [message["content"] for message in loaded["result"]["messages"]] == [
-        "Create an owned conversation.",
-        "The owner remained server-resolved.",
-    ]
+    assert listed["result"]["conversations"] == []
 
-    other_credentials = restarted_manager.create_authenticated_session(uuid4(), "trusted-test-auth")
+    other_credentials = trusted_session(restarted_manager)
     other_profile = identity_repository.create_profile(other_credentials.session.user_id, "Other")
     other_session = restarted_manager.select_profile(
         other_credentials.session.session_id,
@@ -431,7 +431,7 @@ def test_persistent_session_restart_restores_server_user_and_owned_conversation(
     )
     other_credentials = SessionCredentials(other_session, other_credentials.session_token)
     _request, _loaded, errors = send_get(
-        f"/api/conversations/{conversation_id}",
+        f"/api/conversations/{uuid4()}",
         authenticated=(restarted_manager, other_credentials),
     )
     assert errors == [(404, "Conversation not found")]
@@ -468,16 +468,9 @@ def test_sqlite_history_never_releases_withheld_provider_candidate(
         {"message": "Persist only this user request."},
         authenticated=authenticated_user,
     )
-    assert errors == []
-
-    restarted_repository = SQLiteConversationRepository(database_path)
-    messages = restarted_repository.recent_owned(
-        UUID(response["result"]["conversation_id"]),
-        authenticated_user[1].session.user_id,
-        12,
-    )
-    assert [message.role for message in messages] == ["user"]
-    assert all("Unreleased provider candidate" not in message.content for message in messages)
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert repository.list_owned(authenticated_user[1].session.user_id) == ()
 
 
 @pytest.mark.parametrize("conversation_id", ["not-a-uuid", str(uuid4())])
@@ -561,8 +554,7 @@ def test_storage_unavailable_does_not_create_conversation_or_call_chat_provider(
         {"message": "do not lose this request"},
         authenticated=authenticated_user,
     )
-    assert errors == [(503, "Conversation storage is unavailable")]
-    assert errors == [(503, "Conversation storage is unavailable")]
+    assert_authenticated_chat_no_go(errors)
     assert "private storage details" not in repr(errors)
 
 
@@ -627,21 +619,9 @@ def test_withheld_and_provider_failure_content_are_not_stored_as_released_histor
         authenticated=authenticated_user,
     )
 
-    assert errors == []
-    assert "research" not in response["result"]
-    conversation_id = response["result"]["conversation_id"]
-    owner_user_id = authenticated_user[1].session.user_id
-    stored = repositories.recent_owned(UUID(conversation_id), owner_user_id, 12)
-    assert [message.role for message in stored] == ["user"]
-    assert "Candidate content" not in repr(stored)
-    assert "Provider failure details" not in repr(stored)
-
-    _request, loaded, errors = send_get(
-        f"/api/conversations/{conversation_id}",
-        authenticated=authenticated_user,
-    )
-    assert errors == []
-    assert [message["role"] for message in loaded["result"]["messages"]] == ["user"]
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert repositories.list_owned(authenticated_user[1].session.user_id) == ()
 
 
 def test_malformed_released_research_is_not_exposed_or_persisted(
@@ -680,8 +660,7 @@ def test_malformed_released_research_is_not_exposed_or_persisted(
     )
 
     assert response == {}
-    assert errors == [(503, "Conversation storage is unavailable")]
-    assert "127.0.0.1" not in repr(errors)
+    assert_authenticated_chat_no_go(errors)
     assert repositories.list_owned(authenticated_user[1].session.user_id) == ()
 
 
@@ -717,20 +696,10 @@ def test_authenticated_chat_creates_owned_conversation_and_ignores_browser_histo
         authenticated=authenticated_user,
     )
 
-    assert errors == []
-    result = response["result"]
-    conversation_id = UUID(result["conversation_id"])
-    owner_user_id = authenticated_user[1].session.user_id
-    assert repositories.get_owned(conversation_id, owner_user_id) is not None
-    assert calls[0][0] == "current request"
-    assert callable(calls[0][2]["memory_retriever"])
-    assert [record.content for record in repositories.recent_owned(conversation_id, owner_user_id, 12)] == [
-        "current request",
-        "Validated response shown to the user.",
-    ]
-    assert "unvalidated provider output" not in repr(
-        repositories.recent_owned(conversation_id, owner_user_id, 12)
-    )
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
+    assert repositories.list_owned(authenticated_user[1].session.user_id) == ()
 
 
 def test_new_conversation_quota_rejection_creates_no_record_or_calls_provider(
@@ -754,7 +723,7 @@ def test_new_conversation_quota_rejection_creates_no_record_or_calls_provider(
         authenticated=authenticated_user,
     )
 
-    assert errors == [(429, "Conversation storage limit reached")]
+    assert_authenticated_chat_no_go(errors)
     assert repositories._conversations == {}
     assert repositories._messages == {}
 
@@ -796,14 +765,14 @@ def test_existing_conversation_remains_usable_when_user_conversation_quota_is_fu
         authenticated=authenticated_user,
     )
 
-    assert errors == []
-    assert calls == ["continue"]
-    assert response["result"]["conversation_id"] == str(conversation.conversation_id)
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
     assert [message.content for message in repositories.recent_owned(
         conversation.conversation_id,
         owner_user_id,
         12,
-    )] == ["existing message", "continue", "existing conversation response"]
+    )] == ["existing message"]
     assert len(repositories._conversations) == MAX_CONVERSATIONS_PER_USER
 
 
@@ -845,15 +814,9 @@ def test_authenticated_chat_uses_only_server_owned_recent_history(
         authenticated=authenticated_user,
     )
 
-    assert errors == []
-    assert response["result"]["conversation_id"] == str(conversation.conversation_id)
-    assert len(calls) == 1
-    assert calls[0][0] == "current request"
-    assert callable(calls[0][1]["memory_retriever"])
-    assert calls[0][1]["recent_messages"] == [
-        {"role": "user", "content": "server history"},
-        {"role": "assistant", "content": "server reply"},
-    ]
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
 
 
 def test_authenticated_chat_ignores_browser_and_irrelevant_saved_memory(
@@ -887,12 +850,9 @@ def test_authenticated_chat_ignores_browser_and_irrelevant_saved_memory(
         authenticated=authenticated_user,
     )
 
-    assert errors == []
-    assert response["status"] == 200
-    assert calls[0][0] == "current request"
-    assert isinstance(calls[0][1], ChatContext)
-    assert calls[0][1].memory == []
-    assert callable(calls[0][2]["memory_retriever"])
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
 
 
 def test_authenticated_chat_retrieves_bounded_owned_memory_and_audits_metadata_only(
@@ -949,16 +909,10 @@ def test_authenticated_chat_retrieves_bounded_owned_memory_and_audits_metadata_o
         authenticated=authenticated_user,
     )
 
-    assert errors == []
-    assert response["status"] == 200
-    assert calls[0][0] == "Help with project planning."
-    assert calls[0][1].memory == [matching.content]
-    assert callable(calls[0][2]["memory_retriever"])
-    audit = audit_path.read_text(encoding="utf-8")
-    assert '"operation": "retrieval"' in audit
-    assert '"retrieved_count": 1' in audit
-    assert matching.content not in audit
-    assert "Forged project planning instruction" not in audit
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
+    assert not audit_path.exists()
 
 
 def test_revoked_consent_and_anonymous_chat_receive_no_authenticated_memory(
@@ -983,12 +937,24 @@ def test_revoked_consent_and_anonymous_chat_receive_no_authenticated_memory(
             return {"message": "Validated response."}
 
     monkeypatch.setattr(futuristic_app, "ChatService", CapturingChatService)
-    send_chat(monkeypatch, {"message": "Project planning review"}, authenticated=authenticated_user)
-    assert calls[-1][1].memory == ["Project planning review checklist."]
+    _request, response, errors = send_chat(
+        monkeypatch,
+        {"message": "Project planning review"},
+        authenticated=authenticated_user,
+    )
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
 
     memory_repository.set_consent(owner_user_id, False)
-    send_chat(monkeypatch, {"message": "Project planning review"}, authenticated=authenticated_user)
-    assert calls[-1][1].memory == []
+    _request, response, errors = send_chat(
+        monkeypatch,
+        {"message": "Project planning review"},
+        authenticated=authenticated_user,
+    )
+    assert response == {}
+    assert_authenticated_chat_no_go(errors)
+    assert calls == []
 
     send_chat(
         monkeypatch,
@@ -1063,7 +1029,7 @@ def test_authenticated_chat_rejects_malformed_or_unknown_conversation(
         authenticated=authenticated_user,
     )
 
-    assert errors == [(404, "Conversation not found")]
+    assert_authenticated_chat_no_go(errors)
 
 
 def test_another_user_cannot_select_or_write_a_conversation(
@@ -1088,7 +1054,7 @@ def test_another_user_cannot_select_or_write_a_conversation(
         authenticated=authenticated_user,
     )
 
-    assert errors == [(404, "Conversation not found")]
+    assert_authenticated_chat_no_go(errors)
     assert repositories.recent_owned(
         other_user_conversation.conversation_id,
         other_user_conversation.owner_user_id,
@@ -1182,7 +1148,7 @@ def test_chat_rejects_when_per_conversation_message_quota_is_full(
         authenticated=authenticated_user,
     )
 
-    assert errors == [(429, "Conversation storage limit reached")]
+    assert_authenticated_chat_no_go(errors)
 
 
 def test_chat_enforces_per_user_conversation_quota_without_affecting_other_users(
@@ -1208,7 +1174,7 @@ def test_chat_enforces_per_user_conversation_quota_without_affecting_other_users
         authenticated=authenticated_user,
     )
 
-    assert errors == [(429, "Conversation storage limit reached")]
+    assert_authenticated_chat_no_go(errors)
     assert repositories.create(uuid4()).owner_user_id != owner_user_id
 
 

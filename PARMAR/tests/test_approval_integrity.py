@@ -3,7 +3,9 @@ import json
 import sqlite3
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from threading import Thread
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -16,10 +18,22 @@ from PARMAR.chat.readiness import ExternalAuthorization
 from PARMAR.chat.router import ChatRouter
 from PARMAR.chat.service import ChatService
 from PARMAR.conversations import InMemoryConversationRepository
-from PARMAR.identity import LocalDemoPrincipalResolver
+from PARMAR.identity import LocalDemoPrincipalResolver, ProviderBoundIdentityResolver
+from PARMAR.identity_contracts import (
+    AccountIdentity,
+    AuthenticationContext,
+    IdentityEvidenceState,
+    ProviderIdentity,
+    VerifiedProviderIdentity,
+)
 from PARMAR.identity_store import IdentityStorageUnavailable, SQLiteIdentityRepository
 from PARMAR.interface import futuristic_app
-from PARMAR.interface.approvals import PendingApprovalStore, approval_binding_for_pending
+from PARMAR.interface.approvals import (
+    ApprovalStorageUnavailable,
+    ApprovalState,
+    PendingApprovalStore,
+    approval_binding_for_pending,
+)
 from PARMAR.interface.dashboard import TerminalDashboard
 from PARMAR.interface.ui_adapter import PARMARUIAdapter
 from PARMAR.research.service import SearchService
@@ -29,12 +43,16 @@ from PARMAR.sessions import (
     SESSION_COOKIE_NAME,
     SessionManager,
     SessionPolicy,
+    SessionStorageUnavailable,
 )
 
 _DEFAULT_SESSION = object()
 _TEST_SESSION = None
 _TEST_SESSION_MANAGER = None
 _TEST_IDENTITY_REPOSITORY = None
+
+
+from PARMAR.tests.identity_test_support import trusted_session
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +69,7 @@ def isolate_audit_log(monkeypatch, tmp_path):
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=600, absolute_timeout_seconds=1800),
     )
-    _TEST_SESSION = manager.create_authenticated_session(uuid4(), "approval-test")
+    _TEST_SESSION = trusted_session(manager)
     identity_repository = SQLiteIdentityRepository(tmp_path / "approval-identity.sqlite3")
     profile = identity_repository.create_profile(_TEST_SESSION.session.user_id, "Approval test")
     manager.select_profile(
@@ -95,12 +113,57 @@ def post(path, payload, *, session=_DEFAULT_SESSION, headers=None):
     return response
 
 
+def assert_runtime_no_go(response, operation):
+    assert response["status"] == 503
+    assert response["result"]["message"] == (
+        f"Protected operation '{operation}' is disabled: "
+        "an atomic authorization fence is unavailable."
+    )
+
+
 def create_pending_review(request="Purchase a $500 software license"):
     response = post("/api/analyze", {"request": request})
     assert response["status"] == 200
     assert response["result"]["status"] == "APPROVAL_REQUIRED"
-    assert response["result"]["approval_id"]
+    assert response["result"].get("approval_id"), response["result"]
     return response["result"]
+
+
+def test_untrusted_sessions_cannot_create_actionable_analysis_approvals():
+    manager = _TEST_SESSION_MANAGER
+    unmapped = manager.create_authenticated_session(uuid4(), "legacy-unmapped")
+    expired = trusted_session(
+        manager,
+        now=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    revoked = trusted_session(manager)
+    assert manager.revoke(revoked.session.session_id)
+
+    unmapped_response = post(
+        "/api/analyze",
+        {"request": "Purchase a $500 software license"},
+        session=unmapped,
+    )
+    assert unmapped_response["status"] == 200
+    assert unmapped_response["result"]["status"] == "APPROVAL_REQUIRED"
+    assert "approval_id" not in unmapped_response["result"]
+    assert (
+        unmapped_response["result"]["voki_contract"]["approval"]["record_available"]
+        == "UNAVAILABLE"
+    )
+
+    for session in (expired, revoked):
+        response = post(
+            "/api/analyze",
+            {"request": "Purchase a $500 software license"},
+            session=session,
+        )
+        assert response["status"] == 200
+        assert response["result"]["status"] == "APPROVAL_REQUIRED"
+        assert "approval_id" not in response["result"]
+        assert futuristic_app.PENDING_APPROVALS._pending == {}
+
+    assert futuristic_app.PENDING_APPROVALS._pending == {}
 
 
 def test_authenticated_session_uses_a_legitimately_selected_owned_profile():
@@ -112,7 +175,7 @@ def test_authenticated_session_uses_a_legitimately_selected_owned_profile():
         selected.active_profile_id,
     ) is not None
 
-    pending = _start_chat_approval()
+    pending = _start_chat_approval(research=True)
     record = futuristic_app.PENDING_APPROVALS.inspect(
         pending["approval_id"],
         user_id=selected.user_id,
@@ -123,7 +186,7 @@ def test_authenticated_session_uses_a_legitimately_selected_owned_profile():
 
 
 def test_missing_active_profile_cannot_create_or_redeem_approval():
-    session = _TEST_SESSION_MANAGER.create_authenticated_session(uuid4(), "approval-test")
+    session = trusted_session(_TEST_SESSION_MANAGER)
 
     creation = post("/api/analyze", {"request": "Purchase a $500 software license"}, session=session)
     assert creation["status"] == 409
@@ -230,180 +293,40 @@ def test_approval_is_bound_to_original_request_and_consumed_once():
 
 
 def test_chat_approval_creates_the_same_kind_of_owned_server_side_pending_review(monkeypatch):
-    message = "Transfer $500 from the department budget to buy a laptop."
     calls = _install_counting_chat_provider(monkeypatch)
-    response = post("/api/chat", {"message": message})
-
-    assert response["status"] == 200
-    result = response["result"]
-    assert result["status"] == "APPROVAL_REQUIRED"
-    assert result["approval_id"]
-    assert result["provider_status"] == "NOT_STARTED"
-    assert result["response_safety"]["status"] == "NOT_CHECKED"
-    assert result["response_disposition"] == "NOT_APPLICABLE"
-    assert result["voki_contract"]["approval"]["record_available"] == "AVAILABLE"
-    assert calls == []
-
-    pending = futuristic_app.PENDING_APPROVALS.inspect(
-        result["approval_id"],
-        user_id=_TEST_SESSION.session.user_id,
-        session_id=_TEST_SESSION.session.session_id,
+    before_conversation_count = len(
+        futuristic_app.CONVERSATION_REPOSITORY.list_owned(_TEST_SESSION.session.user_id),
     )
-    assert pending is not None
-    assert pending.request_text == message
-    assert pending.decision_id == pending.summary["enforcement"]["decision_id"]
-    assert pending.response["analysis"]["request"] == message
-    assert "approval_id" not in pending.response
-    assert pending.response["voki_contract"]["approval"]["record_available"] == "AVAILABLE"
+    response = post("/api/chat", {"message": "Transfer $500 from the department budget to buy a laptop."})
 
-    decided = post("/api/approval", {
-        "approval_id": result["approval_id"],
-        "decision": "APPROVE",
-    })
-    assert decided["status"] == 200
-    assert decided["result"]["voki_contract"]["approval"]["status"] == "APPROVED"
-    assert decided["result"]["voki_contract"]["request_review"]["status"] == "APPROVAL_REQUIRED"
-    assert decided["result"]["voki_contract"]["provider"]["status"] == "COMPLETED"
+    assert response["status"] == 503
+    assert "atomic authorization fence is unavailable" in response["result"]["message"]
+    assert calls == []
+    assert futuristic_app.PENDING_APPROVALS._pending == {}
+    assert len(
+        futuristic_app.CONVERSATION_REPOSITORY.list_owned(_TEST_SESSION.session.user_id),
+    ) == before_conversation_count
 
 
-def test_approved_research_continues_from_the_server_record_through_search_and_release(monkeypatch):
-    request_text = "Transfer $500 from the department budget to buy a laptop."
+def test_approved_research_is_runtime_no_go_before_search_or_chat_dispatch(monkeypatch):
     search_calls = []
     chat_calls = []
-    conversation_repository = InMemoryConversationRepository()
-    monkeypatch.setattr(futuristic_app, "CONVERSATION_REPOSITORY", conversation_repository)
-    monkeypatch.setattr(futuristic_app, "MESSAGE_REPOSITORY", conversation_repository)
-    active_profile = _TEST_SESSION_MANAGER.resolve(_TEST_SESSION.session_token)
-    assert active_profile is not None and active_profile.active_profile_id is not None
-    conversation = conversation_repository.create_for_message(
-        _TEST_SESSION.session.user_id,
-        request_text,
-        active_profile.active_profile_id,
-    )
+    pending = _start_chat_approval()
 
-    class Search:
-        provider_id = "http-json-search"
+    class UnexpectedService:
+        def respond_approved(self, *_args, **_kwargs):
+            chat_calls.append("dispatch")
+            pytest.fail("Approved continuation reached ChatService despite runtime NO-GO")
 
-        def search(self, query):
-            search_calls.append(query)
-            return [{
-                "title": "Example source",
-                "url": "https://example.org/research",
-                "domain": "example.org",
-                "source_id": "source-1",
-            }]
-
-    class Provider:
-        name = "approval-research-test"
-        locality = "local"
-
-        def generate(self, prompt, context=None):
-            chat_calls.append((prompt, context))
-            return ChatResponse(
-                provider=self.name,
-                content="The approved request is supported by the retrieved source.",
-                safe=False,
-            )
-
-    authorization = ExternalAuthorization(
-        enabled=True,
-        allowed_providers=frozenset({"http-json-search"}),
-        allowed_capabilities=frozenset({"web_search"}),
-        allow_single_provider=True,
-    )
-    monkeypatch.setattr(futuristic_app, "EXTERNAL_AUTHORIZATION", authorization)
-    monkeypatch.setattr(
-        futuristic_app,
-        "ChatService",
-        lambda external_authorization=None: ChatService(
-            router=ChatRouter(provider=Provider()),
-            research_service=SearchService(Search()),
-            external_authorization=external_authorization,
-        ),
-    )
-
-    pending = post("/api/chat", {
-        "message": request_text,
-        "research": True,
-        "conversation_id": str(conversation.conversation_id),
+    monkeypatch.setattr(futuristic_app, "ChatService", lambda **_kwargs: UnexpectedService())
+    response = post("/api/approval", {
+        "approval_id": pending["approval_id"],
+        "decision": "APPROVE",
     })
-    assert pending["status"] == 200
-    pending_result = pending["result"]
-    assert pending_result["status"] == "APPROVAL_REQUIRED"
-    assert pending_result["research"]["status"] == "BLOCKED"
-    assert pending_result["voki_contract"]["provider"]["status"] == "NOT_STARTED"
+
+    assert_runtime_no_go(response, "approved_chat_continuation")
     assert search_calls == []
     assert chat_calls == []
-
-    stored = futuristic_app.PENDING_APPROVALS.inspect(
-        pending_result["approval_id"],
-        user_id=_TEST_SESSION.session.user_id,
-        session_id=_TEST_SESSION.session.session_id,
-    )
-    assert stored is not None
-    assert stored.request_text == request_text
-    assert stored.execution_context["research"] is True
-    pending_messages = conversation_repository.recent_owned(
-        conversation.conversation_id,
-        _TEST_SESSION.session.user_id,
-        12,
-    )
-    assert pending_messages is not None
-    assert len(pending_messages) == 1
-    assert all(message.research is None for message in pending_messages)
-    assert "sources" not in repr(stored.execution_context)
-
-    altered = post("/api/approval", {
-        "approval_id": pending_result["approval_id"],
-        "decision": "APPROVE",
-        "request": "A replacement request",
-        "research": False,
-    })
-    assert altered["status"] == 409
-    assert search_calls == []
-
-    approved = post("/api/approval", {
-        "approval_id": pending_result["approval_id"],
-        "decision": "APPROVE",
-        "research": False,
-    })
-    assert approved["status"] == 200
-    result = approved["result"]
-    assert search_calls == [request_text]
-    assert len(chat_calls) == 1
-    assert result["research"]["status"] == "RESULTS"
-    assert result["research"]["sources"][0]["url"] == "https://example.org/research"
-    assert result["voki_contract"]["approval"]["status"] == "APPROVED"
-    assert result["voki_contract"]["provider"]["status"] == "COMPLETED"
-    assert result["voki_contract"]["response_safety"]["status"] == "PASS"
-    assert result["voki_contract"]["response_disposition"] == "RELEASED"
-    approved_messages = conversation_repository.recent_owned(
-        conversation.conversation_id,
-        _TEST_SESSION.session.user_id,
-        12,
-    )
-    assert approved_messages is not None
-    assert approved_messages[-1].research is not None
-    assert approved_messages[-1].research.sources[0].url == "https://example.org/research"
-
-    replay = post("/api/approval", {
-        "approval_id": pending_result["approval_id"],
-        "decision": "APPROVE",
-    })
-    assert replay["status"] == 410
-    assert search_calls == [request_text]
-
-    rejected_pending = post("/api/chat", {
-        "message": request_text,
-        "research": True,
-    })["result"]
-    rejected = post("/api/approval", {
-        "approval_id": rejected_pending["approval_id"],
-        "decision": "REJECT",
-    })
-    assert rejected["status"] == 200
-    assert rejected["result"]["voki_contract"]["approval"]["status"] == "REJECTED"
-    assert search_calls == [request_text]
 
 
 def _install_counting_chat_provider(monkeypatch, *, content="The reviewed proposal can proceed.", error=None):
@@ -431,16 +354,171 @@ def _install_counting_chat_provider(monkeypatch, *, content="The reviewed propos
     return calls
 
 
-def _start_chat_approval(message="Purchase a $500 software license"):
-    response = post("/api/chat", {
-        "message": message,
-        "context": {"recent_messages": [
-            {"role": "user", "content": "I am comparing options."},
-        ]},
+def _start_chat_approval(message="Purchase a $500 software license", *, research=False):
+    review, dashboard, summary = PARMARUIAdapter.analyze_request_with_dashboard(message)
+    selected = _TEST_SESSION_MANAGER.resolve(_TEST_SESSION.session_token)
+    assert selected is not None and selected.active_profile_id is not None
+    execution_context = {
+        "context": ChatContext(),
+        "selected_provider": None,
+        "orchestration_mode": "SINGLE_PROVIDER",
+        "recent_messages": None,
+        "research": research,
+        "conversation_id": str(uuid4()),
+        "profile_id": str(selected.active_profile_id),
+    }
+    approval_id = futuristic_app.PENDING_APPROVALS.create(
+        message,
+        {"status": "APPROVAL_REQUIRED", "analysis": review},
+        dashboard,
+        summary,
+        user_id=selected.user_id,
+        session_id=selected.session_id,
+        decision_id=summary["enforcement"]["decision_id"],
+        approval_binding=approval_binding_for_pending(
+            selected.user_id,
+            summary["enforcement"]["decision_id"],
+            execution_context,
+        ),
+        execution_context=execution_context,
+    )
+    return {"approval_id": approval_id, "request": message}
+
+
+@pytest.mark.parametrize(
+    "evidence_state",
+    [IdentityEvidenceState.REVOKED, IdentityEvidenceState.EXPIRED],
+)
+def test_chat_does_not_execute_after_identity_evidence_loses_validity(
+    monkeypatch,
+    evidence_state,
+):
+    provider_calls = _install_counting_chat_provider(monkeypatch)
+    service_factory = futuristic_app.ChatService
+
+    def create_service(external_authorization=None):
+        service = service_factory(external_authorization=external_authorization)
+
+        class InvalidatingService:
+            def respond(self, prompt, context=None, **options):
+                if evidence_state is IdentityEvidenceState.EXPIRED:
+                    assert _TEST_SESSION_MANAGER.resolve(
+                        _TEST_SESSION.session_token,
+                        now=_TEST_SESSION.session.authentication_context.expires_at
+                        + timedelta(seconds=1),
+                    ) is None
+                else:
+                    assert _TEST_SESSION_MANAGER.revoke_identity_evidence(
+                        _TEST_SESSION.session.identity_evidence_id,
+                    )
+                return service.respond(prompt, context=context, **options)
+
+        return InvalidatingService()
+
+    monkeypatch.setattr(futuristic_app, "ChatService", create_service)
+    response = post("/api/chat", {"message": "Plan a team lunch for next Friday."})
+
+    assert_runtime_no_go(response, "authenticated_chat")
+    assert provider_calls == []
+
+
+def test_chat_execution_fails_closed_when_session_revalidation_storage_is_unavailable(
+    monkeypatch,
+):
+    provider_calls = _install_counting_chat_provider(monkeypatch)
+
+    def unavailable(*_args, **_kwargs):
+        raise SessionStorageUnavailable("session storage unavailable")
+
+    monkeypatch.setattr(
+        _TEST_SESSION_MANAGER,
+        "resolve_trusted_session",
+        unavailable,
+    )
+    response = post("/api/chat", {"message": "Plan a team lunch for next Friday."})
+
+    assert response["status"] == 503
+    assert provider_calls == []
+
+
+def test_approved_chat_no_go_precedes_approval_execution_claim(monkeypatch):
+    provider_calls = _install_counting_chat_provider(monkeypatch)
+    pending_response = _start_chat_approval()
+    pending = futuristic_app.PENDING_APPROVALS.inspect(
+        pending_response["approval_id"],
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    )
+    assert pending is not None
+    response = post("/api/approval", {
+        "approval_id": pending_response["approval_id"],
+        "decision": "APPROVE",
     })
-    assert response["status"] == 200
-    assert response["result"]["status"] == "APPROVAL_REQUIRED"
-    return response["result"]
+
+    assert_runtime_no_go(response, "approved_chat_continuation")
+    assert provider_calls == []
+    assert futuristic_app.PENDING_APPROVALS.inspect(
+        pending_response["approval_id"],
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    ) is not None
+
+
+def test_approved_chat_fails_closed_when_approval_state_cannot_be_checked(monkeypatch):
+    provider_calls = _install_counting_chat_provider(monkeypatch)
+    pending_response = _start_chat_approval()
+
+    def unavailable(*_args, **_kwargs):
+        raise ApprovalStorageUnavailable("approval storage unavailable")
+
+    monkeypatch.setattr(futuristic_app.PENDING_APPROVALS, "inspect", unavailable)
+    response = post("/api/approval", {
+        "approval_id": pending_response["approval_id"],
+        "decision": "APPROVE",
+    })
+
+    assert response["status"] == 503
+    assert response["result"]["message"] == "Pending approval storage is unavailable"
+    assert provider_calls == []
+
+
+def test_identity_revocation_during_provider_call_withholds_later_release(monkeypatch):
+    provider_calls = []
+
+    class RevokingProvider:
+        name = "revoking-provider-test"
+        locality = "local"
+
+        def generate(self, prompt, context=None):
+            provider_calls.append(prompt)
+            revocation = Thread(
+                target=_TEST_SESSION_MANAGER.revoke_identity_evidence,
+                args=(_TEST_SESSION.session.identity_evidence_id,),
+            )
+            revocation.start()
+            revocation.join(timeout=2)
+            assert not revocation.is_alive()
+            assert _TEST_SESSION_MANAGER.identity_evidence_state(
+                _TEST_SESSION.session.identity_evidence_id,
+            ) is IdentityEvidenceState.REVOKED
+            return ChatResponse(
+                provider=self.name,
+                content="This in-flight output must not be released.",
+                safe=False,
+            )
+
+    monkeypatch.setattr(
+        futuristic_app,
+        "ChatService",
+        lambda external_authorization=None: ChatService(
+            router=ChatRouter(provider=RevokingProvider()),
+            external_authorization=external_authorization,
+        ),
+    )
+    response = post("/api/chat", {"message": "Plan a team lunch for next Friday."})
+
+    assert_runtime_no_go(response, "authenticated_chat")
+    assert provider_calls == []
 
 
 def test_approved_chat_uses_original_review_calls_provider_once_and_releases_pass(monkeypatch):
@@ -462,31 +540,18 @@ def test_approved_chat_uses_original_review_calls_provider_once_and_releases_pas
         "decision": "APPROVE",
     })
 
-    assert approved["status"] == 200
-    result = approved["result"]
-    assert len(calls) == 1
-    assert calls[0][0] == "Purchase a $500 software license"
-    assert calls[0][1].language == "en"
-    assert calls[0][1].approval_required is True
-    assert calls[0][1].approval_state == "APPROVED"
-    assert result["analysis"]["request"] == "Purchase a $500 software license"
-    assert result["voki_contract"]["request_review"]["status"] == "APPROVAL_REQUIRED"
-    assert result["voki_contract"]["approval"]["status"] == "APPROVED"
-    assert result["voki_contract"]["enforcement"]["status"] == "READY_FOR_ACTION"
-    assert result["voki_contract"]["provider"]["status"] == "COMPLETED"
-    assert result["voki_contract"]["response_safety"]["status"] == "PASS"
-    assert result["voki_contract"]["response_disposition"] == "RELEASED"
-    assert result["voki_contract"]["lifecycle"]["state"] == "RELEASED"
+    assert_runtime_no_go(approved, "approved_chat_continuation")
+    assert calls == []
 
     replay = post("/api/approval", {
         "approval_id": pending_result["approval_id"],
         "decision": "APPROVE",
     })
-    assert replay["status"] == 410
-    assert calls and len(calls) == 1
+    assert_runtime_no_go(replay, "approved_chat_continuation")
+    assert calls == []
 
 
-def test_development_auth_browser_path_runs_chat_through_human_approval(monkeypatch):
+def test_development_auth_browser_path_cannot_run_chat_or_approval(monkeypatch):
     monkeypatch.setenv("PARMAR_ENVIRONMENT", "development")
     monkeypatch.setenv("PARMAR_DEVELOPMENT_AUTH_ENABLED", "true")
     monkeypatch.setenv("PARMAR_UI_HOST", "127.0.0.1")
@@ -513,33 +578,28 @@ def test_development_auth_browser_path_runs_chat_through_human_approval(monkeypa
         session=_TEST_SESSION_MANAGER.resolve(token),
     )
     assert development_session.session.user_id == futuristic_app.DEVELOPMENT_AUTH_USER_ID
-    development_profile = _TEST_IDENTITY_REPOSITORY.create_profile(
-        development_session.session.user_id,
-        "Development approval",
-    )
-    development_session.session = _TEST_SESSION_MANAGER.select_profile(
-        development_session.session.session_id,
-        development_session.session.user_id,
-        development_profile.profile_id,
-    )
 
-    message = "Purchase a $500 software license"
-    pending = post("/api/chat", {"message": message}, session=development_session)
-    assert pending["status"] == 200
-    assert pending["result"]["status"] == "APPROVAL_REQUIRED"
-    assert pending["result"]["approval_id"]
-    assert calls == []
-
-    approved = post(
-        "/api/approval",
-        {"approval_id": pending["result"]["approval_id"], "decision": "APPROVE"},
+    analysis = post(
+        "/api/analyze",
+        {"request": "Purchase a $500 software license"},
         session=development_session,
     )
-    assert approved["status"] == 200
-    assert len(calls) == 1
-    assert calls[0][0] == message
-    assert approved["result"]["voki_contract"]["lifecycle"]["state"] == "RELEASED"
-    assert approved["result"]["voki_contract"]["response_safety"]["status"] == "PASS"
+    assert analysis["status"] == 200
+    assert analysis["result"]["status"] == "APPROVAL_REQUIRED"
+    assert "approval_id" not in analysis["result"]
+    assert (
+        analysis["result"]["voki_contract"]["approval"]["record_available"]
+        == "UNAVAILABLE"
+    )
+
+    pending = post(
+        "/api/chat",
+        {"message": "Purchase a $500 software license"},
+        session=development_session,
+    )
+    assert pending["status"] == 401
+    assert calls == []
+    assert futuristic_app.PENDING_APPROVALS._pending == {}
 
 
 @pytest.mark.parametrize("failure", ["invalid", "expired", "wrong_owner", "wrong_session"])
@@ -560,12 +620,12 @@ def test_invalid_approval_never_calls_chat_provider(monkeypatch, failure):
         )
         response = post("/api/approval", payload)
     elif failure == "wrong_owner":
-        other = _TEST_SESSION_MANAGER.create_authenticated_session(uuid4(), "approval-test")
+        other = trusted_session(_TEST_SESSION_MANAGER)
         response = post("/api/approval", payload, session=other)
     else:
-        other = _TEST_SESSION_MANAGER.create_authenticated_session(
-            _TEST_SESSION.session.user_id,
-            "approval-test",
+        other = trusted_session(
+            _TEST_SESSION_MANAGER,
+            _TEST_SESSION.session.account_identity,
         )
         response = post("/api/approval", payload, session=other)
 
@@ -618,9 +678,7 @@ def test_rejected_enforcement_after_approval_never_calls_chat_provider(monkeypat
         "decision": "APPROVE",
     })
 
-    assert result["status"] == 200
-    assert result["result"]["enforcement"]["status"] == "BLOCKED"
-    assert result["result"]["action_boundary"]["execution_allowed"] is False
+    assert_runtime_no_go(result, "approved_chat_continuation")
     assert calls == []
 
 
@@ -633,13 +691,8 @@ def test_approved_chat_provider_failure_has_distinct_failure_contract(monkeypatc
         "decision": "APPROVE",
     })
 
-    contract = result["result"]["voki_contract"]
-    assert result["status"] == 200
-    assert len(calls) == 1
-    assert contract["provider"]["status"] == "FAILED"
-    assert contract["lifecycle"]["state"] == "PROVIDER_FAILED"
-    assert contract["response_safety"]["status"] == "NOT_CHECKED"
-    assert contract["response_disposition"] == "NOT_APPLICABLE"
+    assert_runtime_no_go(result, "approved_chat_continuation")
+    assert calls == []
 
 
 def test_approved_chat_validator_failure_withholds_provider_output(monkeypatch):
@@ -658,12 +711,8 @@ def test_approved_chat_validator_failure_withholds_provider_output(monkeypatch):
         "decision": "APPROVE",
     })
 
-    contract = result["result"]["voki_contract"]
-    assert len(calls) == 1
-    assert contract["provider"]["status"] == "COMPLETED"
-    assert contract["response_safety"]["status"] == "NOT_CHECKED"
-    assert contract["response_disposition"] == "WITHHELD"
-    assert "The reviewed proposal can proceed." not in repr(result["result"])
+    assert_runtime_no_go(result, "approved_chat_continuation")
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -686,13 +735,9 @@ def test_approved_chat_provider_output_uses_response_safety_pipeline(
         "decision": "APPROVE",
     })
 
-    contract = result["result"]["voki_contract"]
-    assert len(calls) == 1
-    assert contract["response_safety"]["status"] == expected_safety
-    assert contract["response_disposition"] == expected_disposition
-    assert contract["lifecycle"]["state"] == expected_lifecycle
-    if expected_disposition == "WITHHELD":
-        assert content not in repr(result["result"])
+    assert_runtime_no_go(result, "approved_chat_continuation")
+    assert calls == []
+    assert content not in repr(result)
 
 
 def test_approved_chat_does_not_reenter_initial_approval_review(monkeypatch):
@@ -713,9 +758,9 @@ def test_approved_chat_does_not_reenter_initial_approval_review(monkeypatch):
         "decision": "APPROVE",
     })
 
-    assert result["status"] == 200
+    assert_runtime_no_go(result, "approved_chat_continuation")
     assert len(analyze_calls) == 1
-    assert len(calls) == 1
+    assert calls == []
 
 
 def test_chat_client_cannot_override_server_request_safety_or_enforcement():
@@ -728,14 +773,7 @@ def test_chat_client_cannot_override_server_request_safety_or_enforcement():
         "execution_allowed": False,
     })
 
-    result = response["result"]
-    assert response["status"] == 200
-    assert result["analysis"]["status"] == "SAFE"
-    assert result["request_safety"]["status"] == "SAFE"
-    assert result["request_safety"]["safe"] is True
-    assert result["analysis"]["enforcement"]["status"] == "READY_FOR_ACTION"
-    assert result["voki_contract"]["request_review"]["status"] == "SAFE"
-    assert result["voki_contract"]["enforcement"]["status"] == "READY_FOR_ACTION"
+    assert_runtime_no_go(response, "authenticated_chat")
 
 
 def test_human_decision_reexecutes_central_enforcement_gate(monkeypatch):
@@ -928,11 +966,10 @@ def test_approval_token_alone_and_unauthenticated_caller_cannot_redeem():
 
 def test_approval_rejects_wrong_user_and_wrong_session():
     pending = create_pending_review()
-    other_user_session = _TEST_SESSION_MANAGER.create_authenticated_session(
-        uuid4(), "approval-test",
-    )
-    same_user_other_session = _TEST_SESSION_MANAGER.create_authenticated_session(
-        _TEST_SESSION.session.user_id, "approval-test",
+    other_user_session = trusted_session(_TEST_SESSION_MANAGER)
+    same_user_other_session = trusted_session(
+        _TEST_SESSION_MANAGER,
+        _TEST_SESSION.session.account_identity,
     )
     payload = {"approval_id": pending["approval_id"], "decision": "APPROVE"}
 
@@ -943,9 +980,231 @@ def test_approval_rejects_wrong_user_and_wrong_session():
     assert wrong_session["status"] == 410
 
 
+def test_owner_can_cancel_pending_approval_idempotently_and_replay_stays_denied():
+    pending = create_pending_review()
+    token = pending["approval_id"]
+    record = futuristic_app.PENDING_APPROVALS.inspect(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    )
+    assert record is not None
+
+    cancelled = post("/api/approval/cancel", {
+        "approval_id": token,
+        "reason_code": "USER_REQUEST",
+    })
+    repeated = post("/api/approval/cancel", {
+        "approval_id": token,
+        "reason_code": "CONTEXT_CHANGED",
+    })
+    replay = post("/api/approval", {
+        "approval_id": token,
+        "decision": "APPROVE",
+    })
+
+    assert cancelled["status"] == 200
+    assert cancelled["result"]["status"] == "CANCELLED"
+    assert cancelled["result"]["idempotent"] is False
+    assert repeated["status"] == 200
+    assert repeated["result"]["idempotent"] is True
+    assert replay["status"] == 410
+    stored = futuristic_app.PENDING_APPROVALS._pending[sha256(token.encode("ascii")).hexdigest()]
+    assert stored.state is ApprovalState.CANCELLED
+    assert stored.audit_evidence["event"] == "APPROVAL_CANCELLED"
+    assert stored.audit_evidence["reason_code"] == "USER_REQUEST"
+    assert stored.audit_evidence["actor_user_id"] == str(_TEST_SESSION.session.user_id)
+    assert stored.audit_evidence["session_id"] == str(_TEST_SESSION.session.session_id)
+    assert stored.audit_evidence["timestamp"]
+
+
+def test_unauthorized_cancellation_is_generic_and_leaves_approval_pending():
+    pending = create_pending_review()
+    other_session = trusted_session(_TEST_SESSION_MANAGER)
+    same_user_other_session = trusted_session(
+        _TEST_SESSION_MANAGER,
+        _TEST_SESSION.session.account_identity,
+    )
+    payload = {
+        "approval_id": pending["approval_id"],
+        "reason_code": "USER_REQUEST",
+    }
+
+    wrong_user = post("/api/approval/cancel", payload, session=other_session)
+    wrong_session = post("/api/approval/cancel", payload, session=same_user_other_session)
+
+    assert wrong_user["status"] == wrong_session["status"] == 410
+    assert wrong_user["result"] == wrong_session["result"]
+    assert futuristic_app.PENDING_APPROVALS.inspect(
+        pending["approval_id"],
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    ) is not None
+
+
+def test_approval_owner_and_actor_use_the_same_trusted_canonical_identity():
+    global _TEST_SESSION, _TEST_SESSION_MANAGER, _TEST_IDENTITY_REPOSITORY
+    first_account = AccountIdentity.generate()
+    second_account = AccountIdentity.generate()
+    providers = {
+        "first-proof": ProviderIdentity("issuer", "first"),
+        "second-proof": ProviderIdentity("issuer", "second"),
+    }
+
+    class Adapter:
+        def verify(self, evidence):
+            provider = providers.get(evidence)
+            if provider is None:
+                return None
+            now = datetime.now(timezone.utc)
+            return VerifiedProviderIdentity(
+                provider,
+                AuthenticationContext(now - timedelta(seconds=1), now + timedelta(minutes=5)),
+            )
+
+    class Bindings:
+        def find_existing_account(self, provider):
+            return {
+                providers["first-proof"]: first_account,
+                providers["second-proof"]: second_account,
+            }.get(provider)
+
+    manager = SessionManager(
+        InMemorySessionRepository(),
+        SessionPolicy(idle_timeout_seconds=600, absolute_timeout_seconds=1800),
+    )
+    resolver = ProviderBoundIdentityResolver(Adapter(), Bindings())
+    owner_session = manager.create_identity_session(resolver, "first-proof")
+    other_session = manager.create_identity_session(resolver, "second-proof")
+    assert owner_session is not None and other_session is not None
+    identity_repository = _TEST_IDENTITY_REPOSITORY
+    for session in (owner_session, other_session):
+        profile = identity_repository.create_profile(session.session.user_id, "Canonical approval")
+        assert manager.select_profile(
+            session.session.session_id,
+            session.session.user_id,
+            profile.profile_id,
+        ) is not None
+    _TEST_SESSION = owner_session
+    _TEST_SESSION_MANAGER = manager
+    futuristic_app.SESSION_MANAGER = manager
+
+    pending = create_pending_review()
+    record = futuristic_app.PENDING_APPROVALS.inspect(
+        pending["approval_id"],
+        user_id=first_account.value,
+        session_id=owner_session.session.session_id,
+    )
+    assert record is not None
+    assert record.user_id == first_account.value
+    assert record.approval_binding.actor_id == first_account.value
+
+    unauthorized_decision = post(
+        "/api/approval",
+        {"approval_id": pending["approval_id"], "decision": "APPROVE"},
+        session=other_session,
+    )
+    unauthorized_cancel = post(
+        "/api/approval/cancel",
+        {"approval_id": pending["approval_id"], "reason_code": "USER_REQUEST"},
+        session=other_session,
+    )
+    spoofed_actor = post(
+        "/api/approval",
+        {
+            "approval_id": pending["approval_id"],
+            "decision": "APPROVE",
+            "actor_id": str(first_account.value),
+        },
+        session=other_session,
+    )
+
+    assert unauthorized_decision["status"] == 410
+    assert unauthorized_cancel["status"] == 410
+    assert spoofed_actor["status"] == 400
+    assert futuristic_app.PENDING_APPROVALS.inspect(
+        pending["approval_id"],
+        user_id=first_account.value,
+        session_id=owner_session.session.session_id,
+    ) is not None
+
+
+def test_cancellation_rejects_binding_mismatch_and_expiry():
+    pending = create_pending_review()
+    token = pending["approval_id"]
+    record = futuristic_app.PENDING_APPROVALS.inspect(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    )
+    assert record is not None and record.approval_binding is not None
+    wrong_binding = replace(record.approval_binding, resource_id="different-resource")
+    store = futuristic_app.PENDING_APPROVALS
+
+    assert store.cancel(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+        reason_code="USER_REQUEST",
+        approval_binding=wrong_binding,
+    ) == "BINDING_MISMATCH"
+    assert store.cancel(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+        reason_code="USER_REQUEST",
+        approval_binding=record.approval_binding,
+        now=record.expires_at + 1,
+    ) == "EXPIRED"
+    assert store.inspect(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    ) is None
+
+
+def test_consumed_approval_cannot_be_cancelled():
+    pending = create_pending_review()
+    token = pending["approval_id"]
+    record = futuristic_app.PENDING_APPROVALS.inspect(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+    )
+    assert record is not None and record.approval_binding is not None
+    assert futuristic_app.PENDING_APPROVALS.consume(
+        token,
+        user_id=_TEST_SESSION.session.user_id,
+        session_id=_TEST_SESSION.session.session_id,
+        decision="APPROVE",
+        approval_binding=record.approval_binding,
+    )[1] == "OK"
+
+    cancelled = post("/api/approval/cancel", {
+        "approval_id": token,
+        "reason_code": "USER_REQUEST",
+    })
+
+    assert cancelled["status"] == 410
+
+
 def test_revoked_session_cannot_redeem_its_pending_approval():
     pending = create_pending_review()
     _TEST_SESSION_MANAGER.revoke(_TEST_SESSION.session.session_id)
+
+    response = post("/api/approval", {
+        "approval_id": pending["approval_id"],
+        "decision": "APPROVE",
+    })
+
+    assert response["status"] == 403
+
+
+def test_revoked_identity_evidence_cannot_redeem_its_pending_approval():
+    pending = create_pending_review()
+    authentication = _TEST_SESSION.session.authentication_context
+    assert authentication is not None
+    assert _TEST_SESSION_MANAGER.revoke_identity_evidence(authentication.evidence_id)
 
     response = post("/api/approval", {
         "approval_id": pending["approval_id"],

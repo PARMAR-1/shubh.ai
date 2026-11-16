@@ -244,7 +244,13 @@ test('Home and dedicated VOKKI use the canonical avatar through the shared real 
   assert.match(avatarSource, /asset: '\/static\/assets\/voki\/default-avatar\.png'/);
   assert.match(avatarSource, /data-voki-default-image/);
   assert.deepEqual(avatarAsset.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-  assert.equal((html.match(/src="\/static\/assets\/voki\/default-avatar\.png"/g) || []).length, 2);
+  assert.equal((html.match(/src="\/static\/assets\/voki\/default-avatar\.png"/g) || []).length, 3);
+  const homeAvatar = html.match(/<div class="home-voki-presence"[\s\S]*?<\/div>/)?.[0];
+  const workspaceAvatar = html.match(/<div class="voki-avatar"[\s\S]*?<\/div>/)?.[0];
+  const ecosystemLauncher = html.match(/<button class="voki-ecosystem-launcher"[\s\S]*?<\/button>/)?.[0];
+  assert.match(homeAvatar || '', /src="\/static\/assets\/voki\/default-avatar\.png"/);
+  assert.match(workspaceAvatar || '', /src="\/static\/assets\/voki\/default-avatar\.png"/);
+  assert.match(ecosystemLauncher || '', /src="\/static\/assets\/voki\/default-avatar\.png"/);
   const homeComposer = html.match(/<form class="home-chat-composer"[\s\S]*?<\/form>/)?.[0];
   assert.ok(homeComposer);
   assert.doesNotMatch(homeComposer, /<img\b/);

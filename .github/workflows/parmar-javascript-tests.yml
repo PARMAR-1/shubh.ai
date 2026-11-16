@@ -1,0 +1,31 @@
+name: PARMAR JavaScript tests
+
+on:
+  push:
+    paths:
+      - ".github/workflows/parmar-javascript-tests.yml"
+      - "PARMAR/tests/**"
+      - "PARMAR/interface/static/**"
+  pull_request:
+    paths:
+      - ".github/workflows/parmar-javascript-tests.yml"
+      - "PARMAR/tests/**"
+      - "PARMAR/interface/static/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  javascript-tests:
+    name: Repository JavaScript tests (Node 24)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Run PARMAR JavaScript tests
+        run: node --test PARMAR/tests/*.cjs PARMAR/tests/*.js

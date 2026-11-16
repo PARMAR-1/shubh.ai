@@ -27,6 +27,10 @@ from PARMAR.interface.ui_adapter import PARMARUIAdapter
 from PARMAR.memories import MemoryStorageUnavailable
 from PARMAR.research.models import ResearchResult, ResearchStatus
 from PARMAR.research.service import SearchService, research_prompt_section
+from PARMAR.safety.runtime_no_go import (
+    UnfencedOperation,
+    require_atomic_authorization_fence,
+)
 from PARMAR.state import LifecycleState
 
 _RESPONSE_STATUS = {
@@ -244,8 +248,12 @@ class ChatService:
         recent_messages: object = None,
         research: bool = False,
         memory_retriever: Callable[[], list[str]] | None = None,
+        execution_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        """Continue a consumed server-side approval using its original reviewed request."""
+        """Reject approved continuation until approval and effects share an atomic fence."""
+        require_atomic_authorization_fence(
+            UnfencedOperation.APPROVED_CHAT_CONTINUATION,
+        )
         analysis = approved_response.get("analysis")
         if not isinstance(analysis, dict) or analysis.get("request") != prompt:
             raise ValueError("Approved chat must match its original server-side review.")
@@ -265,6 +273,7 @@ class ChatService:
             recent_messages=recent_messages,
             research=research,
             memory_retriever=memory_retriever,
+            execution_check=execution_check,
             _approved_review=(review, dashboard, summary),
         )
 
@@ -278,12 +287,21 @@ class ChatService:
         recent_messages: object = None,
         research: bool = False,
         memory_retriever: Callable[[], list[str]] | None = None,
+        execution_check: Callable[[], bool] | None = None,
         _approved_review: tuple[dict[str, Any], Any, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if orchestration_mode not in {SINGLE_PROVIDER, VERIFIED_MULTI_MODEL}:
             raise ValueError("Unsupported orchestration mode.")
         if not isinstance(research, bool):
             raise ValueError("Research mode must be a boolean.")
+        if _approved_review is not None:
+            require_atomic_authorization_fence(
+                UnfencedOperation.APPROVED_CHAT_CONTINUATION,
+            )
+        if memory_retriever is not None:
+            require_atomic_authorization_fence(
+                UnfencedOperation.AUTHENTICATED_CHAT,
+            )
         if _approved_review is None:
             analysis, dashboard, _summary = PARMARUIAdapter.analyze_request_with_dashboard(prompt)
         else:
@@ -307,6 +325,32 @@ class ChatService:
         public_analysis = self._public_value(analysis)
         capability = infer_task_capability(prompt)
         provider_prompt = self._provider_prompt(prompt, recent_messages)
+
+        def execution_is_current() -> bool:
+            return execution_check is None or execution_check() is True
+
+        def execution_denied(*, provider_started: bool = False) -> dict[str, Any]:
+            response = {
+                "safe": None,
+                "status": "EXECUTION_AUTHORIZATION_DENIED",
+                "message": "Current session, identity, approval, or action authorization could not be revalidated. No further protected stage was run.",
+                "provider": "not_started",
+                "provider_status": "COMPLETED" if provider_started else "NOT_STARTED",
+                "provider_error": False,
+                "response_disposition": "WITHHELD" if provider_started else "NOT_APPLICABLE",
+                "analysis": public_analysis,
+                "request_safety": self._request_safety(public_analysis),
+                "response_safety": self._not_checked(
+                    "EXECUTION_AUTHORIZATION_LOST",
+                ).public_payload(),
+            }
+            attach_voki_contract(
+                response,
+                provider_status=response["provider_status"],
+                response_disposition=response["response_disposition"],
+                source="ChatService.respond",
+            )
+            return response
 
         if _approved_review is None and analysis.get("status") in {"BLOCKED", "APPROVAL_REQUIRED"}:
             response = {
@@ -391,10 +435,15 @@ class ChatService:
                     reason_code="REQUEST_NOT_AUTHORIZED_FOR_RESEARCH",
                 )
             else:
+                if not execution_is_current():
+                    return execution_denied()
                 research_result = self.research_service.search(
                     prompt,
                     authorization=self.orchestrator.external_authorization,
+                    execution_check=execution_check,
                 )
+                if research_result.reason_code == "EXECUTION_AUTHORIZATION_DENIED":
+                    return execution_denied()
             if research_result.status in {
                 ResearchStatus.BLOCKED,
                 ResearchStatus.PROVIDER_UNAVAILABLE,
@@ -442,6 +491,8 @@ class ChatService:
                 and action_boundary.get("status") == "ACTION_BOUNDARY_OK"
                 and action_boundary.get("execution_allowed") is True
             ):
+                if not execution_is_current():
+                    return execution_denied()
                 try:
                     provider_context.memory = memory_retriever()
                 except MemoryStorageUnavailable:
@@ -472,7 +523,18 @@ class ChatService:
                 provider_prompt,
                 provider_context,
                 capability=capability,
+                execution_check=execution_check,
             )
+            if (
+                orchestration.failure_state == "EXECUTION_AUTHORIZATION_DENIED"
+                or not execution_is_current()
+            ):
+                return execution_denied(
+                    provider_started=any(
+                        candidate.output is not None
+                        for candidate in orchestration.candidates
+                    ),
+                )
             candidate_validations = []
             for candidate in orchestration.candidates:
                 if candidate.output is None:
@@ -522,6 +584,8 @@ class ChatService:
                 message = "Candidate responses require human review; agreement is not proof of correctness."
             else:
                 message = messages.get(orchestration.outcome, "Multi-model execution did not produce a verified result.")
+            if not execution_is_current():
+                return execution_denied(provider_started=has_output)
             response = {
                 "safe": None,
                 "status": self._chat_response_status(response_safety) if has_output else orchestration.outcome,
@@ -557,7 +621,18 @@ class ChatService:
             selected_provider=selected_provider,
             mode=SINGLE_PROVIDER,
             capability=capability,
+            execution_check=execution_check,
         )
+        if (
+            orchestration.failure_state == "EXECUTION_AUTHORIZATION_DENIED"
+            or not execution_is_current()
+        ):
+            return execution_denied(
+                provider_started=any(
+                    candidate.output is not None
+                    for candidate in orchestration.candidates
+                ),
+            )
         routing = orchestration.routing
         if not orchestration.available or orchestration.response is None:
             status = orchestration.failure_state or "PROVIDER_UNAVAILABLE"
@@ -627,6 +702,8 @@ class ChatService:
             provider=result.provider,
             decision_id=self._response_decision_id(public_analysis),
         )
+        if not execution_is_current():
+            return execution_denied(provider_started=True)
         lifecycle_state = LifecycleState.RELEASED if response_safety.status == PASS else LifecycleState.WITHHELD
         response_disposition = "RELEASED" if lifecycle_state is LifecycleState.RELEASED else "WITHHELD"
         dashboard.state_machine.transition(

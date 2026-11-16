@@ -15,7 +15,14 @@ import pytest
 from PARMAR.chat.context import ChatContext
 from PARMAR.identity_store import SQLiteIdentityRepository
 from PARMAR.interface import futuristic_app
-from PARMAR.identity import HTTPRequestContext, LocalDemoPrincipalResolver, Principal
+from PARMAR.identity import (
+    HTTPRequestContext,
+    LocalDemoPrincipalResolver,
+    Principal,
+    TRUSTED_IDENTITY_SOURCE,
+)
+from PARMAR.identity_contracts import AccountIdentity, AuthenticatedPrincipal
+from PARMAR.tests.identity_test_support import trusted_session
 from PARMAR.sessions import (
     InMemorySessionRepository,
     SESSION_COOKIE_NAME,
@@ -95,8 +102,16 @@ def test_principal_contract_distinguishes_anonymous_and_authenticated_identity()
     assert authenticated.user_id == authenticated_id
     assert authenticated.authentication_source == "test-identity-source"
     assert set(Principal.__dataclass_fields__) == {
-        "authenticated", "user_id", "authentication_source",
+        "authenticated", "user_id", "authentication_source", "account_identity",
     }
+    with pytest.raises(ValueError):
+        Principal.authenticated_user(uuid4(), TRUSTED_IDENTITY_SOURCE)
+    with pytest.raises(ValueError):
+        Principal.authenticated_user(
+            uuid4(),
+            "test-identity-source",
+            account_identity=AccountIdentity.generate(),
+        )
 
 
 def test_json_responses_are_not_cacheable():
@@ -238,13 +253,14 @@ def test_authenticated_principal_is_server_resolved_and_not_passed_to_chat(monke
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=60, absolute_timeout_seconds=300),
     )
-    credentials = manager.create_authenticated_session(uuid4(), "test-identity-source")
+    account_identity = AccountIdentity.generate()
+    credentials = trusted_session(manager, account_identity)
     identity_repository = SQLiteIdentityRepository(tmp_path / "identity.sqlite3")
-    profile = identity_repository.create_profile(credentials.session.user_id, "Security test")
+    profile = identity_repository.create_profile(account_identity.value, "Security test")
     active_profile_id = profile.profile_id
     selected_session = manager.select_profile(
         credentials.session.session_id,
-        credentials.session.user_id,
+        account_identity.value,
         active_profile_id,
     )
     assert selected_session is not None
@@ -260,35 +276,42 @@ def test_authenticated_principal_is_server_resolved_and_not_passed_to_chat(monke
     )
     calls = []
 
-    class CapturingChatService:
+    class UnexpectedChatService:
         def __init__(self, external_authorization=None):
             pass
 
-        def respond(self, prompt, context=None, **options):
-            calls.append((prompt, context, options))
-            return {"message": "model output cannot establish identity"}
+        def respond(self, *_args, **_options):
+            pytest.fail("Authenticated chat reached service execution despite runtime NO-GO")
 
     response = {}
     request._send_json = lambda status, result: response.update(status=status, result=result)
     monkeypatch.setattr(futuristic_app, "SESSION_MANAGER", manager)
     monkeypatch.setattr(futuristic_app, "IDENTITY_REPOSITORY", identity_repository)
     monkeypatch.setattr(futuristic_app, "PRINCIPAL_RESOLVER", LocalDemoPrincipalResolver())
-    monkeypatch.setattr(futuristic_app, "ChatService", CapturingChatService)
+    monkeypatch.setattr(futuristic_app, "ChatService", UnexpectedChatService)
 
     futuristic_app.PARMARRequestHandler.do_POST(request)
 
-    assert errors == []
+    assert errors == [(
+        503,
+        "Protected operation 'authenticated_chat' is disabled: "
+        "an atomic authorization fence is unavailable.",
+    )]
     assert request.request_context == HTTPRequestContext(
-        Principal.authenticated_user(credentials.session.user_id, "test-identity-source"),
+        Principal.authenticated_user(
+            account_identity.value,
+            TRUSTED_IDENTITY_SOURCE,
+            account_identity=account_identity,
+        ),
         credentials.session.session_id,
         active_profile_id,
+        AuthenticatedPrincipal(
+            account_identity,
+            credentials.session.authentication_context,
+        ),
     )
-    assert calls[0][0] == "hello"
-    assert isinstance(calls[0][1], ChatContext)
-    assert calls[0][1].memory == []
-    assert set(calls[0][2]) == {"memory_retriever"}
-    assert callable(calls[0][2]["memory_retriever"])
-    assert "user_id" not in response["result"]
+    assert calls == []
+    assert response == {}
 
 
 def test_local_demo_chat_remains_anonymous_and_functional(monkeypatch, tmp_path):

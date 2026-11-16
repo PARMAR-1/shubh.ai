@@ -134,6 +134,7 @@ The inventory below is the explicit HTTP surface found in [`interface/futuristic
 | `POST /api/analyze` | Public only as stateless, non-persisting, non-egress analysis; authenticated session required before storing a request, creating a pending approval, using private context, or invoking a protected action | Never accept caller-supplied identity or approval authority; any persisted/approval data is owner/session-bound; external transfer follows separate consent gate | Unauthenticated persisted/action path -> 401/403; test that anonymous analysis creates no approval, private record, or external request |
 | `POST /api/scenarios/evaluate` | Public synthetic scenario evaluation only | No user data, account authority, approval, or real side effect | Verify all fixtures synthetic; unknown scenario -> 404; outbound calls and persistent writes = 0 |
 | `POST /api/approval` | Authenticated account and active server session | Pending approval must match caller, session, exact action/request, expiry, single-use state, and profile context; no workspace grant can substitute | Missing/invalid session -> deny; wrong owner/session/profile, altered request, expired/replayed approval -> deny with no side effect; test two accounts and profile switching |
+| `POST /api/approval/cancel` | Existing authenticated principal and active server session; this does not establish or solve production identity mapping | Approval ID is checked against its stored owner/session and exact action binding; a reason code, timestamp, and audit evidence are persisted in the existing approval store. Only pending approvals can transition to cancelled; repeat owner cancellation is idempotent. Cancellation does not authorize or execute an action. | Missing/invalid session -> deny; wrong owner/session, unknown ID, binding mismatch, expiry, or prior consumption -> generic denial without approval details; verify cancellation replay and persistence reload |
 | `POST /api/chat` | Authenticated account for persisted conversation, memory, approval, or protected product behavior. A narrowly bounded Local Demo may be anonymous only when non-persistent, clearly labeled, and unable to use private data or protected capabilities | Existing conversation ID must match owner and active profile; new conversations bind to server principal/profile; memory retrieval is owner-scoped and consented; external provider requires M-02 consent/egress gate | No valid owner/session for persisted/action path -> deny; guessed conversation IDs and cross-profile requests -> 404/deny; anonymous demo produces no account data, persistence, approval, or external egress |
 | `POST /api/phone` | Anonymous Local Demo simulation only; production route disabled absent separate decision | No device API, network access, user account, or real permission is implied | Authenticated caller -> 403; test simulated-only behavior and zero device/network access |
 
@@ -327,3 +328,26 @@ Repository inspection confirmed handler structure, owner-scoped repository primi
 ---
 
 **Change boundary:** This is the single new architecture document for Task 35. No existing file is changed or deleted. No source code, schema, configuration, test, workflow, provider, production authentication, network capability, or migration is introduced.
+
+## 16. Runtime-enforced authorization NO-GO
+
+The current application has a centralized, unconditional runtime gate in
+`safety/runtime_no_go.py` for protected operations whose authorization and
+effect cannot share an atomic fence. It cannot be disabled by browser fields,
+environment configuration, development authentication, or provider settings.
+Authenticated chat execution, approved chat/research continuation, protected
+memory mutations, profile/workspace writes, and session profile selection are
+denied before their protected write or dispatch boundary.
+
+Supported local/demo operations are public stateless analysis, anonymous local
+demo chat/simulation without protected persistence, and logout/session
+revocation within the session store. These are not trusted production identity
+or approval to activate production authentication, external providers, or
+AETHER browsing. The approval store's `EXECUTING` claim remains a local
+single-claim mechanism and is not a cross-store fence.
+
+The listed protected operations await a genuine shared atomic fencing
+architecture. This runtime NO-GO reduces executable exposure but does not solve
+the underlying cross-store race. Do not remove the gate until an independently
+reviewed implementation and race/crash/retry acceptance evidence demonstrate
+the shared fence at each side-effect boundary.
