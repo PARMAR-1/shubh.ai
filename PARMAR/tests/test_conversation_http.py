@@ -1206,7 +1206,10 @@ def test_local_demo_chat_remains_ephemeral_and_preserves_browser_context(
     assert "conversation_id" not in response["result"]
     assert calls == [(
         "hello",
-        {"recent_messages": [{"role": "user", "content": "browser-local history"}]},
+        {
+            "recent_messages": [{"role": "user", "content": "browser-local history"}],
+            "selected_provider": "local-demo",
+        },
     )]
     assert repositories._conversations == {}
     assert repositories._messages == {}

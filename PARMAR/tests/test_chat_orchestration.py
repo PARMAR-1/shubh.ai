@@ -128,7 +128,11 @@ def test_explicit_provider_selection_is_respected_and_executed_once():
         make_model("external-reasoner", "reasoner-remote", external, locality="external", authorized=False),
     ], external_authorization=authorization)
 
-    result = orchestrator.orchestrate("Explain this", selected_provider="external-reasoner")
+    result = orchestrator.orchestrate(
+        "Explain this",
+        selected_provider="external-reasoner",
+        execution_check=lambda: True,
+    )
 
     assert result.available is True
     assert result.selected_provider == "external-reasoner"
@@ -511,11 +515,33 @@ def test_explicit_external_execution_flag_only_enables_injected_fake_models(monk
     )
 
     result = make_orchestrator(models, external_authorization=authorization).execute_verified_multi_model(
-        "Compare", safe_context(), candidates=models
+        "Compare", safe_context(), candidates=models, execution_check=lambda: True
     )
 
     assert result.outcome == "VERIFIED_AGREEMENT"
     assert all(len(provider.calls) == 1 for provider in providers)
+
+
+def test_external_multi_model_requires_execution_revalidation_before_dispatch(monkeypatch):
+    monkeypatch.setenv("PARMAR_VERIFIED_MULTI_MODEL_EXTERNAL_ENABLED", "true")
+    providers = [FakeProvider("remote-a"), FakeProvider("remote-b")]
+    models = [
+        make_model(provider.name, provider.name, provider, locality="external", authorized=True)
+        for provider in providers
+    ]
+    authorization = ExternalAuthorization(
+        enabled=True,
+        allowed_providers=frozenset({"remote-a", "remote-b"}),
+        allowed_capabilities=frozenset({"text_generation", "reasoning"}),
+        allow_verified_multi_model=True,
+    )
+
+    result = make_orchestrator(models, external_authorization=authorization).execute_verified_multi_model(
+        "Compare", safe_context(), candidates=models
+    )
+
+    assert result.failure_state == "EXECUTION_AUTHORIZATION_DENIED"
+    assert all(provider.calls == [] for provider in providers)
 
 
 def test_external_multi_model_flag_cannot_replace_explicit_mode_authorization(monkeypatch):

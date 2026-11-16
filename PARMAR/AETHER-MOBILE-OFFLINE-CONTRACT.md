@@ -287,6 +287,20 @@ DataStore for local preferences (subject to dependency review). Do not declare
 Use Android system bars, cutouts, gesture/predictive back, font scaling, and
 accessible semantics. The local shell must not create a WebView.
 
+**Cycle 1 Tabs presentation**
+
+The Android implementation maps the shared dark-shell direction to a navy
+canvas `#0C1117`, surface `#141B22`, raised surface `#1B242D`, primary text
+`#F2F3F4`, secondary text `#B7C0C8`, copper `#D5A36C`, silver `#CAD2D9`,
+border `#394550`, and restricted-state `#FFB4AB` in `AetherTheme.kt`.
+`TabsScreen` uses the canonical PARMAR emblem, a centered content width capped
+at 920 dp, 16 dp side insets below 400 dp and 24 dp otherwise, 18 dp cards,
+and controls with at least 48 dp height. The create action is 54 dp high.
+The search IME action dismisses the keyboard; clearing search is explicit.
+Creation exposes an in-progress state and local storage/limit errors. The
+offline disclosure remains visible; search matches only locally stored title
+and URL metadata and never resolves or opens an address.
+
 **Android acceptance**
 
 - Build/config inspection confirms no WebView dependency, `INTERNET`

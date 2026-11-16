@@ -257,7 +257,7 @@ def test_free_tier_gemini_uses_default_policy_and_existing_release_gate():
         external_authorization=authorization,
     )
 
-    released = service.respond("Plan a team lunch.")
+    released = service.respond("Plan a team lunch.", execution_check=lambda: True)
 
     assert len(calls) == 1
     assert released["provider"] == "gemini"

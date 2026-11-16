@@ -329,7 +329,11 @@ class ChatService:
         def execution_is_current() -> bool:
             return execution_check is None or execution_check() is True
 
-        def execution_denied(*, provider_started: bool = False) -> dict[str, Any]:
+        def execution_denied(
+            *,
+            provider_started: bool = False,
+            research_result: ResearchResult | None = None,
+        ) -> dict[str, Any]:
             response = {
                 "safe": None,
                 "status": "EXECUTION_AUTHORIZATION_DENIED",
@@ -344,6 +348,8 @@ class ChatService:
                     "EXECUTION_AUTHORIZATION_LOST",
                 ).public_payload(),
             }
+            if research_result is not None:
+                response["research"] = research_result.public_payload()
             attach_voki_contract(
                 response,
                 provider_status=response["provider_status"],
@@ -436,14 +442,18 @@ class ChatService:
                 )
             else:
                 if not execution_is_current():
-                    return execution_denied()
+                    research_result = ResearchResult(
+                        ResearchStatus.BLOCKED,
+                        reason_code="EXECUTION_AUTHORIZATION_DENIED",
+                    )
+                    return execution_denied(research_result=research_result)
                 research_result = self.research_service.search(
                     prompt,
                     authorization=self.orchestrator.external_authorization,
                     execution_check=execution_check,
                 )
                 if research_result.reason_code == "EXECUTION_AUTHORIZATION_DENIED":
-                    return execution_denied()
+                    return execution_denied(research_result=research_result)
             if research_result.status in {
                 ResearchStatus.BLOCKED,
                 ResearchStatus.PROVIDER_UNAVAILABLE,

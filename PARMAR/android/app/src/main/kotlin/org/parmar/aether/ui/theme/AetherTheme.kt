@@ -7,13 +7,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 object AetherColors {
-    val canvas = Color(0xFF141516)
-    val surface = Color(0xFF202123)
-    val textPrimary = Color(0xFFF4EEE6)
-    val textSecondary = Color(0xFFD1C8BE)
-    val accentCopper = Color(0xFFE2A46F)
+    val canvas = Color(0xFF0C1117)
+    val surface = Color(0xFF141B22)
+    val surfaceRaised = Color(0xFF1B242D)
+    val textPrimary = Color(0xFFF2F3F4)
+    val textSecondary = Color(0xFFB7C0C8)
+    val accentCopper = Color(0xFFD5A36C)
+    val accentSilver = Color(0xFFCAD2D9)
     val statusRestricted = Color(0xFFFFB4AB)
-    val borderSubtle = Color(0xFF49433E)
+    val borderSubtle = Color(0xFF394550)
 }
 
 object AetherSpacing {

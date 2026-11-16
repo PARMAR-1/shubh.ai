@@ -597,3 +597,283 @@ summary:focus-visible {
     animation-iteration-count: 1 !important;
   }
 }
+
+.voki-interface-surface {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 14px clamp(20px, 3vw, 40px);
+  width: min(100%, 1480px);
+  padding: clamp(18px, 2.4vw, 36px);
+  border: 1px solid var(--line-mid);
+  border-radius: var(--radius-stage);
+  background:
+    radial-gradient(ellipse at 82% 18%, var(--accent-soft), transparent 34%),
+    linear-gradient(145deg, var(--surface-raised), var(--void));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035), var(--shadow);
+}
+
+.voki-presence-stage {
+  min-height: clamp(460px, 64svh, 680px);
+  border: 1px solid var(--line-soft);
+  border-radius: 20px;
+  background:
+    radial-gradient(ellipse at 50% 34%, var(--accent-soft), transparent 46%),
+    linear-gradient(155deg, var(--surface), var(--void));
+}
+
+.voki-presence {
+  width: min(100%, 560px);
+  color: var(--type-secondary);
+}
+
+.voki-presence-field {
+  border-color: rgba(202, 210, 217, 0.12);
+}
+
+.voki-presence-light {
+  background: radial-gradient(ellipse at 50% 42%, var(--accent-soft), transparent 60%);
+}
+
+.voki-avatar {
+  width: min(100%, 480px);
+}
+
+.voki-avatar-default-image {
+  filter: saturate(0.94);
+}
+
+.voki-interface-topline {
+  min-height: 48px;
+  padding-bottom: 14px;
+  color: var(--type-secondary);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+}
+
+.voki-interface-status,
+.voki-interface-output,
+.voki-history,
+.voki-research-results,
+.voki-speech-controls,
+.voki-identity-onboarding,
+.voki-interface-approval,
+.voki-interface-form {
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 10px 28px rgba(0, 0, 0, 0.16);
+}
+
+.voki-interface-status {
+  gap: 9px;
+  padding: 18px;
+}
+
+.voki-interface-status strong {
+  color: var(--accent-text);
+  font-size: 0.83rem;
+  letter-spacing: 0.1em;
+}
+
+.voki-interface-status p,
+.voki-interface-note,
+.voki-input-privacy,
+.voki-speech-status {
+  color: var(--type-tertiary);
+  line-height: 1.65;
+}
+
+.voki-interface-output {
+  min-height: 84px;
+  padding: 18px;
+  color: var(--type-primary);
+  font-size: 0.94rem;
+  line-height: 1.75;
+}
+
+.voki-history,
+.voki-research-results {
+  border-color: var(--line-soft);
+  border-radius: 14px;
+  background: var(--panel-strong);
+}
+
+.voki-history-message,
+.message-research-source {
+  border-color: var(--line-soft);
+  border-radius: 12px;
+}
+
+.voki-history-message.assistant {
+  background: var(--surface-raised);
+}
+
+.voki-history-message.user {
+  background: var(--deep);
+}
+
+.voki-speech-controls {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.voki-input-controls {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.voki-input-controls .voki-input-status,
+.voki-input-controls .voki-input-privacy {
+  grid-column: 1 / -1;
+}
+
+.voki-speech-toggle {
+  min-height: 48px;
+  color: var(--type-secondary);
+}
+
+.voki-speech-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.voki-proactive-controls {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.voki-interface-form {
+  grid-template-columns: minmax(0, 1fr) 156px;
+  gap: 10px 12px;
+  padding: 14px;
+}
+
+.voki-interface-form textarea {
+  grid-column: 1 / -1;
+  min-height: 96px;
+  border-radius: 12px;
+  line-height: 1.6;
+}
+
+.voki-interface-form .primary-btn {
+  min-height: 54px;
+  align-self: center;
+}
+
+.voki-interface-form .composer-research {
+  min-height: 48px;
+  align-self: center;
+}
+
+.voki-interface-approval {
+  border-color: rgba(199, 154, 104, 0.35);
+  background: var(--accent-soft);
+}
+
+.voki-interface-actions > button,
+.voki-identity-actions > button,
+.voki-input-controls > button,
+.voki-stop-speech {
+  min-height: 48px;
+}
+
+.voki-interface-note {
+  font-size: 0.78rem;
+}
+
+@media (max-width: 900px) {
+  .voki-interface-surface {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    min-height: 0;
+  }
+
+  .voki-presence-stage {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: clamp(280px, 46svh, 420px);
+  }
+
+  .voki-presence {
+    width: clamp(220px, 72vw, 360px);
+  }
+
+  .voki-avatar {
+    width: min(100%, 320px);
+  }
+
+  .voki-interface-topline {
+    grid-row: 2;
+  }
+
+  .voki-interface-status {
+    grid-row: 3;
+  }
+
+  .voki-interface-output {
+    grid-row: 4;
+  }
+}
+
+@media (max-width: 560px) {
+  .voki-interface-surface {
+    width: 100%;
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  .voki-presence-stage {
+    min-height: clamp(250px, 42svh, 340px);
+    border-radius: 16px;
+  }
+
+  .voki-interface-topline {
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 0.69rem;
+  }
+
+  .voki-interface-status,
+  .voki-interface-output {
+    padding: 14px;
+  }
+
+  .voki-input-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voki-input-controls > button {
+    width: 100%;
+  }
+
+  .voki-interface-form {
+    grid-template-columns: minmax(0, 1fr);
+    position: static;
+    padding: 10px;
+  }
+
+  .voki-interface-form textarea {
+    grid-column: 1;
+    min-height: 88px;
+  }
+
+  .voki-interface-form .primary-btn {
+    grid-column: 1;
+    width: 100%;
+  }
+
+  .voki-interface-form .composer-research {
+    min-height: 48px;
+  }
+}
+
+@media (max-height: 560px) and (max-width: 900px) {
+  .voki-presence-stage {
+    min-height: 220px;
+  }
+}

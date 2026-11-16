@@ -1246,6 +1246,51 @@ test('SPEAKING begins only on the real speech start event and ends at the contra
   assert.equal(root.elements['[data-voki-presence]'].dataset.lifecycleState, 'RELEASED');
 });
 
+test('regular released-response speech stops when VOKKI is hidden or the page is left', () => {
+  const previousDocument = globalThis.document;
+  const previousAddEventListener = globalThis.addEventListener;
+  const documentListeners = {};
+  const windowListeners = {};
+  globalThis.document = {
+    hidden: false,
+    addEventListener: (name, callback) => { documentListeners[name] = callback; },
+  };
+  globalThis.addEventListener = (name, callback) => { windowListeners[name] = callback; };
+
+  try {
+    const harness = makeSpeechHarness();
+    const { instance } = makeInterface(
+      async () => apiResponse(releasedResponse()),
+      ({ getLanguage, onStateChange }) => new VOKKISpeechAdapter({
+        synthesis: harness.synthesis,
+        Utterance: class FakeUtterance { constructor(text) { this.text = text; } },
+        getLanguage,
+        onStateChange,
+      }),
+    );
+    instance.speech.setEnabled(true);
+    instance.speech.speakReleasedResponse(releasedResponse());
+    harness.utterance.onstart();
+
+    globalThis.document.hidden = true;
+    documentListeners.visibilitychange();
+    assert.equal(instance.speech.state, 'CANCELLED');
+    assert.equal(harness.synthesis.cancelCount, 1);
+
+    globalThis.document.hidden = false;
+    instance.speech.speakReleasedResponse(releasedResponse());
+    harness.synthesis.spoken[1].onstart();
+    windowListeners.pagehide();
+    assert.equal(instance.speech.state, 'CANCELLED');
+    assert.equal(harness.synthesis.cancelCount, 2);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousAddEventListener === undefined) delete globalThis.addEventListener;
+    else globalThis.addEventListener = previousAddEventListener;
+  }
+});
+
 test('speech cancellation and synthesis errors are distinct client presentation outcomes', () => {
   const harness = makeSpeechHarness();
   harness.adapter.setEnabled(true);

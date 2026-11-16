@@ -2419,8 +2419,10 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
                     )
                 if isinstance(recent_messages, list) and recent_messages:
                     service_options["recent_messages"] = recent_messages
-                if "provider" in payload:
+                if request_context.principal.authenticated and "provider" in payload:
                     service_options["selected_provider"] = payload.get("provider")
+                elif not request_context.principal.authenticated:
+                    service_options["selected_provider"] = "local-demo"
                 if "orchestration_mode" in payload:
                     service_options["orchestration_mode"] = orchestration_mode
                 if research:

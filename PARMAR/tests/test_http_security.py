@@ -316,8 +316,19 @@ def test_authenticated_principal_is_server_resolved_and_not_passed_to_chat(monke
 
 def test_local_demo_chat_remains_anonymous_and_functional(monkeypatch, tmp_path):
     from PARMAR.audit.decision_logs import DecisionLogManager
+    from PARMAR.chat.readiness import ExternalAuthorization
 
     monkeypatch.setenv("PARMAR_CHAT_PROVIDER", "local-demo")
+    monkeypatch.setattr(
+        futuristic_app,
+        "EXTERNAL_AUTHORIZATION",
+        ExternalAuthorization(
+            enabled=True,
+            allowed_providers=frozenset({"openai"}),
+            allowed_capabilities=frozenset({"text_generation"}),
+            allow_single_provider=True,
+        ),
+    )
     monkeypatch.setattr(futuristic_app, "SESSION_MANAGER", None)
     original_init = DecisionLogManager.__init__
 
@@ -325,7 +336,10 @@ def test_local_demo_chat_remains_anonymous_and_functional(monkeypatch, tmp_path)
         original_init(self, log_path or str(tmp_path / "principal-audit.jsonl"))
 
     monkeypatch.setattr(DecisionLogManager, "__init__", isolated_init)
-    body = json.dumps({"message": "Plan a team lunch."}).encode("utf-8")
+    body = json.dumps({
+        "message": "Plan a team lunch.",
+        "provider": "openai",
+    }).encode("utf-8")
     request, errors, _ = make_request("/api/chat", body=body)
     response = {}
     request._send_json = lambda status, result: response.update(status=status, result=result)
@@ -336,6 +350,104 @@ def test_local_demo_chat_remains_anonymous_and_functional(monkeypatch, tmp_path)
     assert request.request_context.principal == Principal.anonymous_local_demo()
     assert response["status"] == 200
     assert response["result"]["provider"] == "local-demo"
+
+
+def test_anonymous_chat_research_cannot_dispatch_search_or_external_chat(monkeypatch):
+    from PARMAR.chat.providers import LocalDemoProvider
+    from PARMAR.chat.readiness import ExternalAuthorization
+    from PARMAR.chat.router import ChatRouter
+    from PARMAR.chat.service import ChatService
+    from PARMAR.research.service import SearchService
+
+    calls = []
+
+    class Search:
+        provider_id = "http-json-search"
+
+        def search(self, query):
+            calls.append(("search", query))
+            return []
+
+    authorization = ExternalAuthorization(
+        enabled=True,
+        allowed_providers=frozenset({"openai", "http-json-search"}),
+        allowed_capabilities=frozenset({"text_generation", "web_search"}),
+        allow_single_provider=True,
+    )
+    monkeypatch.setattr(futuristic_app, "EXTERNAL_AUTHORIZATION", authorization)
+    monkeypatch.setattr(
+        futuristic_app,
+        "ChatService",
+        lambda external_authorization=None: ChatService(
+            router=ChatRouter(provider=LocalDemoProvider()),
+            research_service=SearchService(Search()),
+            external_authorization=external_authorization,
+        ),
+    )
+    body = json.dumps({
+        "message": "What is photosynthesis?",
+        "provider": "openai",
+        "research": True,
+    }).encode("utf-8")
+    response = {}
+    request, errors, _served = make_request("/api/chat", body=body)
+    request._send_json = lambda status, result: response.update(status=status, result=result)
+
+    futuristic_app.PARMARRequestHandler.do_POST(request)
+
+    assert errors == []
+    assert request.request_context.principal == Principal.anonymous_local_demo()
+    assert response["status"] == 200
+    assert response["result"]["research"]["reason_code"] == "EXECUTION_AUTHORIZATION_DENIED"
+    assert calls == []
+
+
+def test_anonymous_approval_required_chat_does_not_create_pending_approval(monkeypatch):
+    calls = []
+
+    def unexpected_create(*_args, **_kwargs):
+        calls.append("approval")
+        pytest.fail("Anonymous chat created a pending approval.")
+
+    monkeypatch.setattr(futuristic_app.PENDING_APPROVALS, "create", unexpected_create)
+    body = json.dumps({
+        "message": "Transfer $500 from the department budget to buy a laptop.",
+    }).encode("utf-8")
+    response = {}
+    request, errors, _served = make_request("/api/chat", body=body)
+    request._send_json = lambda status, result: response.update(status=status, result=result)
+
+    futuristic_app.PARMARRequestHandler.do_POST(request)
+
+    assert errors == []
+    assert response["status"] == 200
+    assert response["result"]["status"] == "APPROVAL_REQUIRED"
+    assert "approval_id" not in response["result"]
+    assert calls == []
+
+
+def test_anonymous_stateless_analysis_remains_available_without_persisting_approval(monkeypatch):
+    calls = []
+
+    def unexpected_create(*_args, **_kwargs):
+        calls.append("approval")
+        pytest.fail("Anonymous stateless analysis created a pending approval.")
+
+    monkeypatch.setattr(futuristic_app.PENDING_APPROVALS, "create", unexpected_create)
+    body = json.dumps({
+        "request": "Transfer $500 from the department budget to buy a laptop.",
+    }).encode("utf-8")
+    response = {}
+    request, errors, _served = make_request("/api/analyze", body=body)
+    request._send_json = lambda status, result: response.update(status=status, result=result)
+
+    futuristic_app.PARMARRequestHandler.do_POST(request)
+
+    assert errors == []
+    assert response["status"] == 200
+    assert response["result"]["status"] == "APPROVAL_REQUIRED"
+    assert "approval_id" not in response["result"]
+    assert calls == []
 
 
 def test_static_request_rejects_parent_traversal():

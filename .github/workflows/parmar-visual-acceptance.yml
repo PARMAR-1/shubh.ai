@@ -1,0 +1,64 @@
+name: PARMAR visual acceptance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/parmar-visual-acceptance.yml"
+      - "PARMAR/interface/**"
+      - "PARMAR/chat/**"
+      - "PARMAR/research/**"
+      - "PARMAR/safety/**"
+      - "PARMAR/tests/test_voki_interface.js"
+  push:
+    paths:
+      - ".github/workflows/parmar-visual-acceptance.yml"
+      - "PARMAR/interface/**"
+      - "PARMAR/chat/**"
+      - "PARMAR/research/**"
+      - "PARMAR/safety/**"
+      - "PARMAR/tests/test_voki_interface.js"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  voki-visual-acceptance:
+    name: VOKKI browser acceptance (Playwright 1.65.1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.5"
+          cache: npm
+          cache-dependency-path: PARMAR/interface/visual-tests/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.8"
+
+      - name: Install pinned browser-test dependencies
+        working-directory: PARMAR/interface/visual-tests
+        run: npm ci
+
+      - name: Install the matching pinned Chromium build and Linux dependencies
+        working-directory: PARMAR/interface/visual-tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the actual local PARMAR interface at all required viewports
+        working-directory: PARMAR/interface/visual-tests
+        env:
+          CI: "true"
+        run: npm test
+
+      - name: Retain screenshots, Playwright report, and visual acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parmar-voki-visual-acceptance
+          path: PARMAR/interface/visual-tests/artifacts/**
+          if-no-files-found: warn
+          retention-days: 14

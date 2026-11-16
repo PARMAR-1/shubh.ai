@@ -1,8 +1,10 @@
 package org.parmar.aether.ui.tabs
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.UUID
 
@@ -104,11 +106,36 @@ class LocalTabsSessionTest {
         }
     }
 
-    private fun tab(order: Int, pinned: Boolean = false) = LocalTab(
+    @Test
+    fun tabSearchMatchesLocalTitleAndSavedUrlWithoutOpeningTheAddress() {
+        val newTab = tab(order = 0)
+        val saved = tab(
+            order = 1,
+            kind = LocalTabKind.SAVED_URL,
+            title = "Research notes",
+            url = "https://example.org/Offline/Guide",
+        )
+        val blankTitle = tab(order = 2, title = " ")
+
+        assertTrue(newTab.matchesSearch("  NEW LOCAL  "))
+        assertTrue(saved.matchesSearch("research"))
+        assertTrue(saved.matchesSearch("offline/guide"))
+        assertTrue(blankTitle.matchesSearch("new local"))
+        assertTrue(saved.matchesSearch("  "))
+        assertFalse(saved.matchesSearch("news"))
+    }
+
+    private fun tab(
+        order: Int,
+        pinned: Boolean = false,
+        kind: LocalTabKind = LocalTabKind.NEW,
+        title: String? = null,
+        url: String? = null,
+    ) = LocalTab(
         id = UUID.randomUUID().toString(),
-        kind = LocalTabKind.NEW,
-        url = null,
-        title = null,
+        kind = kind,
+        url = url,
+        title = title,
         pinned = pinned,
         order = order,
         createdAt = 0,

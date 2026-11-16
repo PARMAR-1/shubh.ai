@@ -21,7 +21,18 @@ data class LocalTab(
     val createdAt: Long,
     val updatedAt: Long,
     val schemaVersion: Int = 1,
-)
+) {
+    fun matchesSearch(query: String): Boolean {
+        val term = query.trim()
+        if (term.isEmpty()) return true
+        val defaultTitle = when (kind) {
+            LocalTabKind.NEW -> "New local tab"
+            LocalTabKind.SAVED_URL -> "Saved URL tab"
+        }
+        return (title?.takeIf(String::isNotBlank) ?: defaultTitle).contains(term, ignoreCase = true) ||
+            (url?.contains(term, ignoreCase = true) == true)
+    }
+}
 
 data class LocalTabsSession(
     val tabs: List<LocalTab> = emptyList(),

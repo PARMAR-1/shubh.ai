@@ -311,7 +311,10 @@ def test_chat_service_normalizes_http_provider_failures_without_secret_disclosur
         raise HTTPError("https://provider.example/chat", 401, API_KEY, {}, io.BytesIO(b""))
 
     provider = make_provider(opener)
-    response = authorized_chat_service(provider).respond("Plan a team lunch.")
+    response = authorized_chat_service(provider).respond(
+        "Plan a team lunch.",
+        execution_check=lambda: True,
+    )
 
     assert response["provider_error"] is True
     assert response["status"] == "PROVIDER_UNAVAILABLE"
@@ -327,7 +330,10 @@ def test_chat_service_does_not_echo_prompt_credentials_in_api_response():
 
     provider = make_provider(opener)
     prompt = f"Plan a team lunch.\nAuthorization: Bearer {API_KEY}\npassword: private-value"
-    response = authorized_chat_service(provider).respond(prompt)
+    response = authorized_chat_service(provider).respond(
+        prompt,
+        execution_check=lambda: True,
+    )
 
     assert API_KEY not in repr(response)
     assert "private-value" not in repr(response)
@@ -340,7 +346,10 @@ def test_chat_service_normalizes_http_timeout_without_secret_disclosure():
         raise TimeoutError(f"timeout {API_KEY}")
 
     provider = make_provider(opener)
-    response = authorized_chat_service(provider).respond("Plan a team lunch.")
+    response = authorized_chat_service(provider).respond(
+        "Plan a team lunch.",
+        execution_check=lambda: True,
+    )
 
     assert response["provider_error"] is True
     assert response["status"] == "PROVIDER_TIMEOUT"

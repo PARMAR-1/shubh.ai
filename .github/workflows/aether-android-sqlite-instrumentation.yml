@@ -76,3 +76,94 @@ jobs:
             PARMAR/android/app/build/outputs/androidTest-results/connected/**
           if-no-files-found: warn
           retention-days: 14
+
+  ui-visual-acceptance:
+    name: AETHER visual acceptance (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: narrow-phone-320dp
+            screen_size: 640x1280
+            density: 320
+          - profile: phone-390dp
+            screen_size: 780x1688
+            density: 320
+          - profile: tablet-800dp
+            screen_size: 1600x2400
+            density: 320
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            PARMAR/android/**/*.gradle*
+            PARMAR/android/gradle/libs.versions.toml
+            PARMAR/android/gradle/wrapper/gradle-wrapper.properties
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.8"
+
+      - name: Run actual AETHER UI on the pinned API 35 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -no-snapshot -camera-back none
+          emulator-boot-timeout: 600
+          working-directory: PARMAR/android
+          script: |
+            set -u
+            python3 -m unittest scripts.test_render_visual_acceptance || exit 1
+            PROFILE="${{ matrix.profile }}"
+            EVIDENCE_DIR="artifacts/aether/${PROFILE}"
+            mkdir -p "$EVIDENCE_DIR"
+            if ! adb shell wm size "${{ matrix.screen_size }}"; then exit 1; fi
+            if ! adb shell wm density "${{ matrix.density }}"; then exit 1; fi
+            adb shell wm size | grep -Fq "${{ matrix.screen_size }}" || exit 1
+            adb shell wm density | grep -Fq "${{ matrix.density }}" || exit 1
+            {
+              echo "Requested logical profile: ${PROFILE}"
+              echo "Emulator profile: pixel_2 / API 35 / google_apis / x86_64"
+              adb shell wm size
+              adb shell wm density
+            } > "$EVIDENCE_DIR/device.txt" 2>&1
+            adb shell pm clear org.parmar.aether >/dev/null 2>&1 || true
+            adb logcat -c
+            TEST_STATUS=PASS
+            ./gradlew --no-daemon --stacktrace :app:connectedDebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.class=org.parmar.aether.ui.tabs.AetherTabsVisualAcceptanceTest \
+              || TEST_STATUS=FAIL
+            if adb shell run-as org.parmar.aether test -f cache/aether-visual/evidence.json >/dev/null 2>&1; then
+              adb exec-out run-as org.parmar.aether cat cache/aether-visual/evidence.json > "$EVIDENCE_DIR/evidence.json"
+            fi
+            for SCREENSHOT in tabs-empty tabs-populated tabs-scrolled tabs-search-empty tabs-create-failure; do
+              if adb shell run-as org.parmar.aether test -f "cache/aether-visual/${SCREENSHOT}.png" >/dev/null 2>&1; then
+                adb exec-out run-as org.parmar.aether cat "cache/aether-visual/${SCREENSHOT}.png" > "$EVIDENCE_DIR/${SCREENSHOT}.png"
+              fi
+            done
+            python3 scripts/render_visual_acceptance.py "$EVIDENCE_DIR" --profile "$PROFILE" --run-status "$TEST_STATUS" || TEST_STATUS=FAIL
+            adb logcat -d > "$EVIDENCE_DIR/emulator-logcat.txt" 2>&1 || true
+            if [ "$TEST_STATUS" != PASS ]; then exit 1; fi
+
+      - name: Retain AETHER screenshots, dimensions, and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-visual-${{ matrix.profile }}
+          path: |
+            PARMAR/android/artifacts/aether/${{ matrix.profile }}/**
+            PARMAR/android/app/build/reports/androidTests/connected/**
+            PARMAR/android/app/build/outputs/androidTest-results/connected/**
+          if-no-files-found: warn
+          retention-days: 14

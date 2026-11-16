@@ -366,7 +366,7 @@ def test_chat_api_ignores_client_credentials_urls_and_adapter_payload_fields(mon
     PARMARRequestHandler.do_POST(request)
 
     assert response == {"status": 200, "result": {"message": "received"}}
-    assert captured["selected_provider"] == "openai"
+    assert captured["selected_provider"] == "local-demo"
     assert captured["prompt"] == payload["message"]
     assert secret not in repr(captured)
     assert "attacker.example" not in repr(captured)

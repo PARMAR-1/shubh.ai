@@ -690,6 +690,19 @@ class AIOrchestrator:
                 failure_state="PROVIDER_UNAVAILABLE",
                 candidates=(CandidateResult(plan.selected_provider or "unavailable", plan.selected_model or "unknown", "UNAVAILABLE"),),
             )
+        if selected_model.locality != "local" and execution_check is None:
+            return replace(
+                plan,
+                available=False,
+                failure_reason="Trusted execution authorization is required before external provider dispatch.",
+                failure_state="EXECUTION_AUTHORIZATION_DENIED",
+                candidates=(CandidateResult(
+                    plan.selected_provider or "configured",
+                    plan.selected_model or "unknown",
+                    "NOT_EXECUTED",
+                    normalized_error="EXECUTION_AUTHORIZATION_DENIED",
+                ),),
+            )
         selection_reason = "explicit_user_selection" if selected_provider is not None else (
             "local_default" if plan.selected_provider == self.registry.default_provider == "local-demo"
             else "server_configuration" if plan.selected_provider == self.registry.default_provider
@@ -985,6 +998,22 @@ class AIOrchestrator:
                     outcome="EXECUTION_DISABLED",
                     candidates=not_executed,
                 )
+
+        if external_models and execution_check is None:
+            not_executed = tuple(CandidateResult(
+                model.provider_id,
+                model.model_id,
+                "NOT_EXECUTED",
+                capability=capability,
+                normalized_error="EXECUTION_AUTHORIZATION_DENIED",
+                validation_status="NOT_RUN",
+            ) for model in ordered_models)
+            return self._execution_failure(
+                capability,
+                "EXECUTION_AUTHORIZATION_DENIED",
+                "Trusted execution authorization is required before external provider dispatch.",
+                candidates=not_executed,
+            )
 
         safe_prompt = sanitize_provider_text(prompt)
         candidate_results: list[CandidateResult] = []

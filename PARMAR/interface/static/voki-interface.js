@@ -337,6 +337,7 @@
         if (globalThis.document?.hidden) {
           this.cancelVoiceInput();
           this.proactiveSpeech?.suspend();
+          this.speech?.cancel();
         } else {
           this.proactiveSpeech?.flush();
         }
@@ -345,6 +346,7 @@
       globalThis.addEventListener?.('pagehide', () => {
         this.cancelVoiceInput();
         this.proactiveSpeech?.suspend();
+        this.speech?.cancel();
       });
       const section = this.root.closest?.('.section-view');
       if (section && typeof globalThis.MutationObserver === 'function') {
@@ -352,6 +354,7 @@
           if (!section.classList.contains('active')) {
             this.cancelVoiceInput();
             this.proactiveSpeech?.suspend();
+            this.speech?.cancel();
             if (this.identityOnboarding
               && (this.identityOnboarding.stream || this.identityOnboarding.cameraRequestPending)) {
               this.identityOnboarding.cancel();

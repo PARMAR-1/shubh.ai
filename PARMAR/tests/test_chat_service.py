@@ -99,7 +99,7 @@ def test_chat_endpoint_ignores_browser_memory_context_for_slice_five(monkeypatch
         def __init__(self, external_authorization=None):
             pass
 
-        def respond(self, prompt, context=None):
+        def respond(self, prompt, context=None, **_options):
             calls.append((prompt, context))
             return {"message": "received"}
 
@@ -166,11 +166,14 @@ def test_chat_endpoint_forwards_explicit_orchestration_mode_and_rejects_invalid(
 
     legacy = post_chat({"message": "Legacy request", "language": "en"})
     assert legacy["status"] == 200
-    assert calls[-1][2] == {}
+    assert calls[-1][2] == {"selected_provider": "local-demo"}
 
     explicit = post_chat({"message": "Use two local candidates", "orchestration_mode": "VERIFIED_MULTI_MODEL"})
     assert explicit["status"] == 200
-    assert calls[-1][2] == {"orchestration_mode": "VERIFIED_MULTI_MODEL"}
+    assert calls[-1][2] == {
+        "selected_provider": "local-demo",
+        "orchestration_mode": "VERIFIED_MULTI_MODEL",
+    }
 
     invalid = post_chat({"message": "Invalid mode", "orchestration_mode": "OTHER"})
     assert invalid["status"] == 400
@@ -326,7 +329,10 @@ def test_chat_endpoint_forwards_recent_turns_separately_from_safety_context(monk
     assert calls[0][1].response_length == "concise"
     assert calls[0][1].response_style == "explanatory"
     assert calls[0][1].custom_instructions == "Use plain language."
-    assert calls[0][2] == {"recent_messages": payload["context"]["recent_messages"]}
+    assert calls[0][2] == {
+        "recent_messages": payload["context"]["recent_messages"],
+        "selected_provider": "local-demo",
+    }
 
 
 def test_chat_endpoint_selects_voki_presentation_only_for_the_voki_surface(monkeypatch):
@@ -851,6 +857,56 @@ def test_explicit_paid_provider_selection_is_not_made_eligible_by_authorization(
     assert calls == []
     assert response["status"] in {"PAID_PROVIDER_BLOCKED", "NO_ELIGIBLE_AI_PLUGIN"}
     assert response["provider_error"] is True
+
+
+def test_external_chat_requires_trusted_execution_revalidation_before_dispatch():
+    calls = []
+
+    class ExternalProvider:
+        name = "test-external"
+        locality = "external"
+
+        def generate(self, prompt, context=None):
+            calls.append(prompt)
+            return ChatResponse(provider=self.name, content="External response.", safe=False)
+
+    provider = ExternalProvider()
+    router = ChatRouter(provider=provider)
+    registry = ProviderModelRegistry(default_provider=provider.name)
+    registry.register(ProviderModelCapability(
+        provider_id=provider.name,
+        model_id=provider.name,
+        capabilities=frozenset({"text_generation"}),
+        input_modalities=frozenset({"text"}),
+        output_modalities=frozenset({"text"}),
+        locality="external",
+        available=True,
+        configured=True,
+        authorized=True,
+        adapter=provider,
+        pricing_policy=LOCAL_FREE,
+    ))
+    authorization = ExternalAuthorization(
+        enabled=True,
+        allowed_providers=frozenset({provider.name}),
+        allowed_capabilities=frozenset({"text_generation"}),
+        allow_single_provider=True,
+    )
+    service = ChatService(
+        router=router,
+        orchestrator=AIOrchestrator(
+            router=router,
+            registry=registry,
+            external_authorization=authorization,
+        ),
+        external_authorization=authorization,
+    )
+
+    result = service.respond("Plan a team lunch.")
+
+    assert result["status"] == "EXECUTION_AUTHORIZATION_DENIED"
+    assert result["provider_status"] == "NOT_STARTED"
+    assert calls == []
 
 
 def test_provider_response_credentials_are_sanitized_before_returning():

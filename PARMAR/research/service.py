@@ -68,7 +68,7 @@ class SearchService:
                 ResearchStatus.BLOCKED,
                 reason_code="INVALID_RESEARCH_QUERY",
             )
-        if execution_check is not None and execution_check() is not True:
+        if execution_check is None or execution_check() is not True:
             return ResearchResult(
                 ResearchStatus.BLOCKED,
                 reason_code="EXECUTION_AUTHORIZATION_DENIED",

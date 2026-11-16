@@ -323,14 +323,21 @@ def test_service_distinguishes_results_empty_unavailable_failure_and_invalid():
 
         return SearchService(Adapter())
 
-    results = authorizer(result=[valid_source()]).search("query", authorization=AUTHORIZATION)
-    empty = authorizer(result=[]).search("query", authorization=AUTHORIZATION)
-    failed = authorizer(error=SearchProviderError()).search("query", authorization=AUTHORIZATION)
+    execution_check = lambda: True
+    results = authorizer(result=[valid_source()]).search(
+        "query", authorization=AUTHORIZATION, execution_check=execution_check
+    )
+    empty = authorizer(result=[]).search(
+        "query", authorization=AUTHORIZATION, execution_check=execution_check
+    )
+    failed = authorizer(error=SearchProviderError()).search(
+        "query", authorization=AUTHORIZATION, execution_check=execution_check
+    )
     invalid = authorizer(result=[{"title": "missing URL"}]).search(
-        "query", authorization=AUTHORIZATION
+        "query", authorization=AUTHORIZATION, execution_check=execution_check
     )
     unavailable = SearchService(UnavailableSearchProvider()).search(
-        "query", authorization=AUTHORIZATION
+        "query", authorization=AUTHORIZATION, execution_check=execution_check
     )
     blocked = authorizer(result=[]).search("query")
 
@@ -340,6 +347,29 @@ def test_service_distinguishes_results_empty_unavailable_failure_and_invalid():
     assert invalid.status is ResearchStatus.INVALID_RESULTS
     assert unavailable.status is ResearchStatus.PROVIDER_UNAVAILABLE
     assert blocked.status is ResearchStatus.BLOCKED
+
+
+def test_search_requires_trusted_execution_revalidation_before_provider_dispatch():
+    calls = []
+
+    class Search:
+        provider_id = "http-json-search"
+
+        def search(self, query):
+            calls.append(query)
+            return []
+
+    service = SearchService(Search())
+    denied = service.search("query", authorization=AUTHORIZATION)
+    stale = service.search(
+        "query",
+        authorization=AUTHORIZATION,
+        execution_check=lambda: False,
+    )
+
+    assert denied.reason_code == "EXECUTION_AUTHORIZATION_DENIED"
+    assert stale.reason_code == "EXECUTION_AUTHORIZATION_DENIED"
+    assert calls == []
 
 
 def test_blocked_and_approval_required_chat_requests_never_reach_search_provider(monkeypatch):
@@ -461,7 +491,7 @@ def test_research_chat_failure_is_separate_from_chat_provider_failure():
         router=ChatRouter(provider=LocalTestChatProvider()),
         research_service=SearchService(FailedSearch()),
         external_authorization=AUTHORIZATION,
-    ).respond("What is photosynthesis?", research=True)
+    ).respond("What is photosynthesis?", research=True, execution_check=lambda: True)
 
     assert result["status"] == "RESEARCH_PROVIDER_FAILED"
     assert result["research"]["status"] == "PROVIDER_FAILED"
@@ -481,7 +511,7 @@ def test_successful_research_keeps_source_links_and_chat_voki_lifecycle_separate
         router=ChatRouter(provider=LocalTestChatProvider()),
         research_service=SearchService(Search()),
         external_authorization=AUTHORIZATION,
-    ).respond("What is photosynthesis?", research=True)
+    ).respond("What is photosynthesis?", research=True, execution_check=lambda: True)
 
     assert result["research"]["status"] == "RESULTS"
     assert result["research"]["sources"][0]["url"].startswith("https://example.org/")
@@ -538,7 +568,10 @@ def test_chat_http_forwards_explicit_research_mode(monkeypatch):
     PARMARRequestHandler.do_POST(request)
 
     assert response["status"] == 200
-    assert calls == [("What is photosynthesis?", {"research": True})]
+    assert calls == [(
+        "What is photosynthesis?",
+        {"selected_provider": "local-demo", "research": True},
+    )]
 
 
 from PARMAR.tests.identity_test_support import trusted_session
