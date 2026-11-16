@@ -6,9 +6,9 @@
   const DEFAULT_VOKKI_IDENTITY = Object.freeze({
     id: 'vokki-local-default',
     kind: 'local-default',
-    source: 'reference-crop',
-    reference: 'file_00000000bd50820b9c027852032b8da5.png',
-    asset: '/static/assets/voki/default-avatar.png',
+    source: 'provided-reference',
+    reference: 'Vokki.png',
+    asset: '/static/assets/voki/Vokki.png',
   });
   const lifecycleExpressions = Object.freeze({
     UNKNOWN: 'unavailable',

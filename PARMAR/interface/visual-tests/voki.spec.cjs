@@ -19,11 +19,10 @@ async function inspectLayout(page) {
     const surface = root?.querySelector('[data-voki-interface]');
     const selectors = [
       '.voki-presence-stage',
-      '.voki-interface-topline',
-      '.voki-interface-status',
-      '.voki-interface-output',
       '.voki-speech-controls',
       '.voki-interface-form',
+      '.voki-identity-onboarding',
+      '.voki-interface-approval',
     ];
     const elements = selectors.flatMap((selector) => {
       const element = surface?.querySelector(selector);
@@ -39,7 +38,7 @@ async function inspectLayout(page) {
         width: Math.round(rect.width),
         height: Math.round(rect.height),
         horizontalContentOverflow: element.scrollWidth > element.clientWidth + 1,
-        clipped: (
+        clipped: selector !== '.voki-presence-stage' && (
           (['hidden', 'clip'].includes(style.overflowX)
             && element.scrollWidth > element.clientWidth + 1)
           || (['hidden', 'clip'].includes(style.overflowY)
@@ -52,14 +51,29 @@ async function inspectLayout(page) {
       for (let second = first + 1; second < elements.length; second += 1) {
         const a = elements[first];
         const b = elements[second];
+        if (a.selector === '.voki-presence-stage' || b.selector === '.voki-presence-stage') continue;
         if (a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top) {
           overlaps.push(`${a.selector} overlaps ${b.selector}`);
         }
       }
     }
     const portrait = surface?.querySelector('.voki-avatar-default-image');
+    const stage = surface?.querySelector('.voki-presence-stage');
     const lifecycle = surface?.querySelector('[data-voki-lifecycle]');
     const text = surface?.innerText || '';
+    const visibleText = [];
+    const textWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (textWalker.nextNode()) {
+      const node = textWalker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || !node.textContent?.trim() || parent.closest('.sr-only, [aria-hidden="true"]')) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      if (rect.width > 1 && rect.height > 1) visibleText.push(node.textContent.trim());
+    }
+    const portraitRect = portrait?.getBoundingClientRect();
+    const stageRect = stage?.getBoundingClientRect();
 
     return {
       viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -77,7 +91,21 @@ async function inspectLayout(page) {
         source: portrait?.getAttribute('src') ?? '',
         loaded: Boolean(portrait?.complete && portrait.naturalWidth > 0),
         width: portrait?.naturalWidth ?? 0,
+        height: portrait?.naturalHeight ?? 0,
+        proportional: Boolean(
+          portraitRect
+          && Math.abs(
+            (portraitRect.width / portraitRect.height)
+            - (portrait?.naturalWidth / portrait?.naturalHeight),
+          ) < 0.01,
+        ),
       },
+      stage: {
+        width: Math.round(stageRect?.width ?? 0),
+        height: Math.round(stageRect?.height ?? 0),
+      },
+      referenceComposition: getComputedStyle(stage).getPropertyValue('--voki-reference-composition').trim(),
+      visibleText,
       lifecycle: lifecycle?.textContent?.trim() ?? '',
       misleadingPresenceClaim: /\b(?:VOKKI\s+(?:is\s+)?(?:online|connected|processing)|connected\s+to\s+(?:PARMAR|core))\b/i.test(text),
       visible: {
@@ -133,13 +161,16 @@ for (const viewport of viewports) {
       const workspace = page.locator('#section-voki');
       await expect(workspace).toHaveClass(/active/);
       await expect(workspace.getByRole('heading', { name: 'VOKKI', exact: true })).toBeVisible();
+      if (viewport.width <= 760) {
+        await expect(page.locator('.mobile-bottom-nav')).toBeVisible();
+      }
       await expect(workspace.locator('.voki-presence-stage')).toBeVisible();
       await expect(workspace.locator('.voki-interface-output')).toBeVisible();
       await expect(workspace.locator('.voki-interface-form')).toBeVisible();
       await expect(workspace.locator('[data-voki-lifecycle]')).toHaveText('STATE UNAVAILABLE');
 
       const portrait = workspace.locator('.voki-avatar-default-image');
-      await expect(portrait).toHaveAttribute('src', '/static/assets/voki/default-avatar.png');
+      await expect(portrait).toHaveAttribute('src', '/static/assets/voki/Vokki.png');
       await expect.poll(() => portrait.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
 
       const initialLayout = await inspectLayout(page);
@@ -151,6 +182,17 @@ for (const viewport of viewports) {
         element.left >= -1 && element.right <= viewport.width + 1
       )), 'primary content remains within the viewport width').toBe(true);
       expect(initialLayout.portrait.loaded, 'canonical VOKKI portrait loads').toBe(true);
+      expect(initialLayout.portrait.width).toBe(1672);
+      expect(initialLayout.portrait.height).toBe(941);
+      expect(initialLayout.portrait.proportional, 'the source image keeps its natural proportions').toBe(true);
+      expect(initialLayout.referenceComposition).toBe(viewport.width <= 820 ? 'mobile' : 'desktop');
+      expect(
+        viewport.width <= 820
+          ? initialLayout.stage.height >= viewport.height * 0.7
+          : initialLayout.stage.width >= viewport.width * 0.9,
+        'the responsive canonical portrait remains prominent',
+      ).toBe(true);
+      expect(initialLayout.visibleText, 'the VOKKI section has no visible text').toEqual([]);
       expect(initialLayout.misleadingPresenceClaim, 'no fabricated online/connected/processing status').toBe(false);
       expect(initialLayout.visible.presence && initialLayout.visible.conversation, 'presence and conversation areas are visible').toBe(true);
 

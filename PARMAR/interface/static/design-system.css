@@ -877,3 +877,579 @@ summary:focus-visible {
     min-height: 220px;
   }
 }
+
+@media (min-width: 761px) {
+  body[data-active-section="voki"] .app-shell {
+    display: block;
+    width: 100%;
+    max-width: none;
+    min-height: 100svh;
+  }
+
+  body[data-active-section="voki"] {
+    overflow: hidden;
+  }
+
+  body[data-active-section="voki"] .sidebar,
+  body[data-active-section="voki"] .topbar {
+    display: none;
+  }
+
+  body[data-active-section="voki"] .main-panel,
+  body[data-active-section="voki"] .workspace {
+    width: 100%;
+    height: 100svh;
+    max-width: none;
+    padding: 0;
+  }
+
+  body[data-active-section="voki"] .section-view.active#section-voki {
+    position: fixed;
+    z-index: 80;
+    inset: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    padding: 0;
+    background: #08090a;
+  }
+}
+
+@media (max-width: 760px) {
+  body[data-active-section="voki"] .section-view.active#section-voki {
+    position: relative;
+    display: block;
+    height: calc(100svh - 200px);
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+    background: #08090a;
+  }
+
+  body[data-active-section="voki"] .voki-interface-surface {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+}
+
+#section-voki > .voki-view-heading {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+}
+
+#section-voki .voki-view-heading > .voki-exit {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(241, 238, 232, 0.26);
+  border-radius: 50%;
+  background: rgba(8, 9, 10, 0.56);
+  color: #f1eee8;
+  pointer-events: auto;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+#section-voki .voki-exit svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+#section-voki .voki-interface-surface {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #08090a;
+  box-shadow: none;
+}
+
+#section-voki .voki-presence-stage {
+  --voki-reference-composition: desktop;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: min(100vw, 177.7778svh);
+  height: auto;
+  min-height: 0;
+  max-height: 100svh;
+  aspect-ratio: 1672 / 941;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #101112;
+  transform: translate(-50%, -50%);
+}
+
+#section-voki .voki-presence-stage::before,
+#section-voki .voki-presence-stage::after {
+  display: none;
+}
+
+#section-voki .voki-presence {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+#section-voki .voki-presence-field,
+#section-voki .voki-presence-light,
+#section-voki .voki-presence-caption {
+  display: none;
+}
+
+#section-voki .voki-avatar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+}
+
+#section-voki .voki-avatar-default-image {
+  position: absolute;
+  top: -13.3%;
+  left: -11.3%;
+  display: block;
+  width: 152.3%;
+  max-width: none;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  object-fit: fill;
+  object-position: center;
+  filter: none;
+}
+
+#section-voki .voki-interface-topline,
+#section-voki .voki-interface-status,
+#section-voki .voki-interface-output,
+#section-voki .voki-history,
+#section-voki .voki-research-results,
+#section-voki .voki-interface-note,
+#section-voki .voki-speech-status,
+#section-voki .voki-input-privacy,
+#section-voki .voki-identity-onboarding > p,
+#section-voki .voki-interface-approval > .approval-eyebrow,
+#section-voki .voki-interface-approval > .approval-waiting-title,
+#section-voki [data-voki-approval-message] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+#section-voki .voki-presence-caption {
+  display: none;
+}
+
+#section-voki .voki-speech-controls {
+  position: absolute;
+  z-index: 2;
+  bottom: max(82px, calc(env(safe-area-inset-bottom) + 72px));
+  left: 50%;
+  display: flex;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid rgba(241, 238, 232, 0.2);
+  border-radius: 999px;
+  background: rgba(8, 9, 10, 0.62);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.3);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px) saturate(115%);
+  -webkit-backdrop-filter: blur(18px) saturate(115%);
+}
+
+#section-voki .voki-input-controls,
+#section-voki .voki-proactive-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#section-voki .voki-proactive-controls {
+  padding: 0;
+  border: 0;
+}
+
+#section-voki .voki-speech-controls button,
+#section-voki .voki-speech-toggle {
+  position: relative;
+  display: grid;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  min-height: 42px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(241, 238, 232, 0.2);
+  border-radius: 50%;
+  background: rgba(241, 238, 232, 0.08);
+  color: #f1eee8;
+  font-size: 0;
+  cursor: pointer;
+}
+
+#section-voki .voki-speech-controls button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+#section-voki [data-voki-talk]::before {
+  content: "◉";
+  font-size: 18px;
+}
+
+#section-voki [data-voki-cancel-voice]::before {
+  content: "×";
+  font-size: 23px;
+}
+
+#section-voki [data-voki-stop-speech]::before {
+  content: "■";
+  font-size: 15px;
+}
+
+#section-voki .voki-speech-toggle input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#section-voki .voki-speech-toggle:has([data-voki-speech-toggle])::after {
+  content: "♫";
+  font-size: 17px;
+  pointer-events: none;
+}
+
+#section-voki .voki-speech-toggle:has([data-voki-proactive-toggle])::after {
+  content: "◉";
+  font-size: 16px;
+  pointer-events: none;
+}
+
+#section-voki .voki-speech-toggle:has([data-voki-mute-toggle])::after {
+  content: "⊘";
+  font-size: 17px;
+  pointer-events: none;
+}
+
+#section-voki .voki-speech-toggle:has(input:checked) {
+  border-color: rgba(232, 199, 157, 0.64);
+  background: rgba(199, 154, 104, 0.28);
+}
+
+#section-voki .voki-speech-toggle:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+#section-voki .voki-stop-speech[hidden],
+#section-voki .voki-identity-actions > [hidden] {
+  display: none !important;
+}
+
+#section-voki .voki-identity-onboarding {
+  position: absolute;
+  z-index: 3;
+  top: max(16px, env(safe-area-inset-top));
+  left: max(16px, env(safe-area-inset-left));
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+}
+
+#section-voki .voki-identity-onboarding summary {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(241, 238, 232, 0.2);
+  border-radius: 50%;
+  background: rgba(8, 9, 10, 0.56);
+  color: #f1eee8;
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+#section-voki .voki-identity-onboarding summary::before {
+  content: "◉";
+  font-size: 17px;
+}
+
+#section-voki .voki-identity-onboarding summary::after {
+  display: none;
+}
+
+#section-voki .voki-identity-onboarding[open] {
+  width: min(250px, calc(100vw - 32px));
+  padding: 8px;
+  border: 1px solid rgba(241, 238, 232, 0.2);
+  border-radius: 18px;
+  background: rgba(8, 9, 10, 0.88);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+#section-voki .voki-identity-onboarding[open] summary {
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+#section-voki .voki-identity-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, 42px);
+  gap: 6px;
+  padding: 8px;
+}
+
+#section-voki .voki-identity-actions > button,
+#section-voki .voki-interface-actions > button {
+  display: grid;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  min-height: 42px;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 0;
+}
+
+#section-voki [data-voki-identity-start]::before,
+#section-voki [data-voki-identity-enable]::before {
+  content: "◉";
+  font-size: 17px;
+}
+
+#section-voki [data-voki-identity-capture]::before {
+  content: "◎";
+  font-size: 17px;
+}
+
+#section-voki [data-voki-identity-approve]::before,
+#section-voki [data-voki-decision="APPROVE"]::before {
+  content: "✓";
+  font-size: 18px;
+}
+
+#section-voki [data-voki-identity-retake]::before {
+  content: "↻";
+  font-size: 19px;
+}
+
+#section-voki [data-voki-identity-cancel]::before,
+#section-voki [data-voki-decision="REJECT"]::before {
+  content: "×";
+  font-size: 22px;
+}
+
+#section-voki [data-voki-identity-remove]::before {
+  content: "−";
+  font-size: 20px;
+}
+
+#section-voki .voki-interface-approval:not([hidden]) {
+  position: absolute;
+  z-index: 4;
+  bottom: max(140px, calc(env(safe-area-inset-bottom) + 130px));
+  left: 50%;
+  display: flex;
+  width: max-content;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(241, 238, 232, 0.2);
+  border-radius: 999px;
+  background: rgba(8, 9, 10, 0.72);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+#section-voki .voki-interface-actions {
+  display: flex;
+  gap: 6px;
+}
+
+#section-voki .voki-interface-form {
+  position: absolute;
+  z-index: 2;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: 50%;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  grid-template-rows: 44px;
+  gap: 6px;
+  width: min(380px, calc(100vw - 32px));
+  padding: 6px;
+  border: 1px solid rgba(241, 238, 232, 0.2);
+  border-radius: 999px;
+  background: rgba(8, 9, 10, 0.68);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px) saturate(115%);
+  -webkit-backdrop-filter: blur(18px) saturate(115%);
+}
+
+#section-voki .voki-interface-form textarea {
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  min-height: 44px;
+  height: 44px;
+  padding: 12px 8px;
+  border: 0;
+  background: transparent;
+  color: #f1eee8;
+  resize: none;
+}
+
+#section-voki .voki-interface-form textarea::placeholder {
+  color: transparent;
+  opacity: 0;
+}
+
+#section-voki .voki-interface-form .composer-research {
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
+  display: grid;
+  width: 42px;
+  min-height: 42px;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(241, 238, 232, 0.08);
+  color: #f1eee8;
+  font-size: 17px;
+}
+
+#section-voki .voki-interface-form .composer-research::after {
+  content: "⌕";
+  pointer-events: none;
+}
+
+#section-voki .voki-interface-form .composer-research input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#section-voki .voki-interface-form .composer-research:has(input:checked) {
+  background: rgba(199, 154, 104, 0.32);
+}
+
+#section-voki .voki-interface-form .composer-research:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+#section-voki .voki-interface-form .primary-btn {
+  grid-column: 3;
+  grid-row: 1;
+  display: grid;
+  width: 42px;
+  min-height: 42px;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+}
+
+#section-voki .voki-interface-form .button-arrow {
+  margin: 0;
+  font-size: 18px;
+}
+
+#section-voki .voki-identity-preview {
+  max-width: 100%;
+}
+
+@media (max-width: 820px) {
+  #section-voki .voki-presence-stage {
+    --voki-reference-composition: mobile;
+    width: min(calc(100vw - 20px), 50svh);
+    aspect-ratio: 1 / 2;
+  }
+
+  #section-voki .voki-avatar-default-image {
+    top: -59.4%;
+    left: -492.3%;
+    width: 638.2%;
+  }
+}
+
+@media (max-width: 420px) {
+  #section-voki .voki-speech-controls {
+    bottom: max(78px, calc(env(safe-area-inset-bottom) + 68px));
+  }
+
+  #section-voki .voki-speech-controls button,
+  #section-voki .voki-speech-toggle {
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    min-height: 38px;
+  }
+}
+
+@media (max-width: 760px) {
+  #section-voki .voki-presence-stage {
+    width: min(calc(100vw - 20px), calc((100svh - 200px) / 2));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body[data-active-section="voki"] .section-view.active#section-voki {
+    animation: none;
+  }
+}

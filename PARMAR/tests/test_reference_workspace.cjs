@@ -116,8 +116,8 @@ test('Chat presents persisted conversations in a searchable workspace pane', () 
   assert.match(app, /\.text-button\[data-action\]/);
 });
 
-test('reference surfaces retain VOKKI’s canonical local portrait in Home and VOKKI', () => {
-  assert.equal((html.match(/data-voki-default-image src="\/static\/assets\/voki\/default-avatar\.png"/g) || []).length, 2);
+test('reference surfaces retain VOKKI’s canonical provided portrait in Home and VOKKI', () => {
+  assert.equal((html.match(/data-voki-default-image src="\/static\/assets\/voki\/Vokki\.png"/g) || []).length, 2);
   assert.match(html, /data-voki-home-avatar/);
   assert.match(html, /data-voki-avatar-host/);
   assert.match(styles, /\.home-voki-avatar-image/);

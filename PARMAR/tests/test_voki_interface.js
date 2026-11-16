@@ -383,9 +383,9 @@ test('avatar initializes with the canonical reference identity and neutral unava
   assert.equal(root.dataset.lifecycleState, 'UNKNOWN');
   assert.equal(root.dataset.expression, 'unavailable');
   assert.equal(avatar.lifecycle, 'UNKNOWN');
-  assert.equal(DEFAULT_VOKKI_IDENTITY.source, 'reference-crop');
-  assert.equal(DEFAULT_VOKKI_IDENTITY.reference, 'file_00000000bd50820b9c027852032b8da5.png');
-  assert.equal(DEFAULT_VOKKI_IDENTITY.asset, '/static/assets/voki/default-avatar.png');
+  assert.equal(DEFAULT_VOKKI_IDENTITY.source, 'provided-reference');
+  assert.equal(DEFAULT_VOKKI_IDENTITY.reference, 'Vokki.png');
+  assert.equal(DEFAULT_VOKKI_IDENTITY.asset, '/static/assets/voki/Vokki.png');
   assert.equal(defaultImage.src, DEFAULT_VOKKI_IDENTITY.asset);
   assert.equal(defaultImage.hidden, false);
 });
@@ -604,8 +604,8 @@ test('Home keeps the canonical VOKKI portrait and preserves optional local-refer
   const homeSection = html.match(/data-section="home" id="section-home"[\s\S]*?(?=<section class="section-view core-workspace" data-section="core")/)?.[0] || '';
   const vokiSection = html.match(/id="section-voki"[\s\S]*?(?=<section class="section-view" data-section="aether")/)?.[0] || '';
   assert.match(homeSection, /data-voki-home-avatar/);
-  assert.match(homeSection, /data-voki-default-image src="\/static\/assets\/voki\/default-avatar\.png"/);
-  assert.match(vokiSection, /data-voki-default-image src="\/static\/assets\/voki\/default-avatar\.png"/);
+  assert.match(homeSection, /data-voki-default-image src="\/static\/assets\/voki\/Vokki\.png"/);
+  assert.match(vokiSection, /data-voki-default-image src="\/static\/assets\/voki\/Vokki\.png"/);
   assert.doesNotMatch(vokiSection, /data-voki-approved-image/);
   assert.match(vokiSection, /data-voki-identity-start/);
   assert.match(vokiSection, /never replaces VOKKI’s canonical portrait/);

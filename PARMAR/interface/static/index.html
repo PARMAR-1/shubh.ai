@@ -134,7 +134,7 @@
               <div class="home-voki-presence" data-voki-home-avatar data-expression="unavailable" data-lifecycle-state="UNKNOWN" role="img" aria-label="VOKKI, PARMAR’s canonical default avatar">
                 <span class="home-voki-halo home-voki-halo-outer" aria-hidden="true"></span>
                 <span class="home-voki-halo home-voki-halo-inner" aria-hidden="true"></span>
-                <img class="home-voki-avatar-image" data-voki-default-image src="/static/assets/voki/default-avatar.png" alt="VOKKI, PARMAR’s canonical default avatar" />
+                <img class="home-voki-avatar-image" data-voki-default-image src="/static/assets/voki/Vokki.png" alt="VOKKI, PARMAR’s canonical default avatar" />
                 <span class="home-voki-caption" aria-hidden="true">VOKKI <span>PARMAR / HERE WHEN YOU NEED HER</span></span>
               </div>
               <div class="home-hero-date glass-panel" aria-label="Your local date and time">
@@ -225,7 +225,7 @@
           </section>
 
           <section class="section-view" data-section="voki" id="section-voki" aria-labelledby="voki-interface-title">
-            <div class="view-heading voki-view-heading"><div><span class="eyebrow">PARMAR / VOKKI WORKSPACE</span><h1 id="voki-interface-title">VOKKI</h1></div><p>VOKKI communicates PARMAR’s result. PARMAR’s review, enforcement, approval, and response checks remain authoritative.</p><button class="text-button voki-exit" type="button" data-section="home" aria-label="Return to PARMAR workspace"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7M8 12h12" /></svg><span>Workspace</span></button></div>
+            <div class="view-heading voki-view-heading"><div class="sr-only"><span class="eyebrow">PARMAR / VOKKI WORKSPACE</span><h1 id="voki-interface-title">VOKKI</h1></div><p class="sr-only">VOKKI communicates PARMAR’s result. PARMAR’s review, enforcement, approval, and response checks remain authoritative.</p><button class="text-button voki-exit" type="button" data-section="home" aria-label="Return to PARMAR workspace"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7M8 12h12" /></svg><span class="sr-only">Workspace</span></button></div>
             <section class="voki-interface-surface" data-voki-interface data-presence-state="unknown" aria-label="VOKKI interaction">
               <div class="voki-presence-stage" aria-hidden="true">
                 <div class="voki-presence" data-voki-presence data-presence-state="unknown" data-lifecycle-state="UNKNOWN">
@@ -234,74 +234,74 @@
                   <span class="voki-presence-field field-inner"></span>
                   <span class="voki-presence-light"></span>
                   <div class="voki-avatar" data-voki-avatar data-voki-avatar-host data-expression="unavailable" data-avatar-kind="local-default">
-                    <img class="voki-avatar-default-image" data-voki-default-image src="/static/assets/voki/default-avatar.png" alt="" />
+                    <img class="voki-avatar-default-image" data-voki-default-image src="/static/assets/voki/Vokki.png" alt="" />
                   </div>
                 </div>
-                <div class="voki-presence-caption"><span class="voki-presence-caption-line"></span><span>PARMAR / VOKKI</span><span class="voki-presence-caption-line"></span></div>
+                <div class="voki-presence-caption sr-only"><span class="voki-presence-caption-line"></span><span>PARMAR / VOKKI</span><span class="voki-presence-caption-line"></span></div>
               </div>
-              <div class="voki-interface-topline"><span class="presence-small" aria-hidden="true">V</span><span>VOKKI</span><span class="conversation-divider"></span><span>PARMAR review &amp; release boundary</span></div>
-              <p class="voki-interface-note">VOKKI’s friendly conversational style is guidance for configured conversational providers, not a separate chat system. Local Demo remains deterministic and does not generate natural conversation.</p>
-              <div class="voki-interface-status">
+              <div class="voki-interface-topline sr-only"><span class="presence-small" aria-hidden="true">V</span><span>VOKKI</span><span class="conversation-divider"></span><span>PARMAR review &amp; release boundary</span></div>
+              <p class="voki-interface-note sr-only">VOKKI’s friendly conversational style is guidance for configured conversational providers, not a separate chat system. Local Demo remains deterministic and does not generate natural conversation.</p>
+              <div class="voki-interface-status sr-only">
                 <span class="eyebrow">PARMAR lifecycle</span>
                 <strong data-voki-lifecycle data-lifecycle="UNKNOWN" role="status" aria-live="polite">STATE UNAVAILABLE</strong>
                 <span class="voki-presence-state-label" data-voki-presence-label>STATE UNAVAILABLE</span>
                 <p data-voki-transport aria-live="polite">No request in progress.</p>
               </div>
-              <p class="voki-interface-output" data-voki-output aria-live="polite">PARMAR state is not available until a request is reviewed.</p>
-              <section class="voki-history" data-voki-history hidden aria-label="Selected conversation history">
+              <p class="voki-interface-output sr-only" data-voki-output aria-live="polite">PARMAR state is not available until a request is reviewed.</p>
+              <section class="voki-history sr-only" data-voki-history hidden aria-label="Selected conversation history">
                 <h2>Conversation history</h2>
                 <div class="voki-history-messages" data-voki-history-messages role="log" aria-live="off" aria-relevant="additions"></div>
               </section>
-              <section class="voki-research-results" data-voki-research-results hidden aria-label="Sources from PARMAR's released response"></section>
+              <section class="voki-research-results sr-only" data-voki-research-results hidden aria-label="Sources from PARMAR's released response"></section>
               <div class="voki-speech-controls" aria-label="VOKKI voice controls">
                 <div class="voki-input-controls" role="group" aria-label="VOKKI voice input">
-                  <button class="secondary-btn" type="button" data-voki-talk disabled aria-describedby="voki-input-status voki-input-privacy">Talk</button>
-                  <button class="voki-stop-speech" type="button" data-voki-cancel-voice hidden>Cancel listening</button>
-                  <p class="voki-speech-status voki-input-status" data-voki-input-status id="voki-input-status" role="status" aria-live="polite">Checking on-device speech recognition support.</p>
-                  <p class="voki-input-privacy" id="voki-input-privacy">When available, speech is recognized on this device only; raw audio is not sent to a recognition service. The transcript is sent through PARMAR’s existing chat flow, like typed text. No cloud transcription fallback is used.</p>
+                  <button class="secondary-btn" type="button" data-voki-talk disabled aria-describedby="voki-input-status voki-input-privacy"><span class="sr-only">Talk</span></button>
+                  <button class="voki-stop-speech" type="button" data-voki-cancel-voice hidden><span class="sr-only">Cancel listening</span></button>
+                  <p class="voki-speech-status voki-input-status sr-only" data-voki-input-status id="voki-input-status" role="status" aria-live="polite">Checking on-device speech recognition support.</p>
+                  <p class="voki-input-privacy sr-only" id="voki-input-privacy">When available, speech is recognized on this device only; raw audio is not sent to a recognition service. The transcript is sent through PARMAR’s existing chat flow, like typed text. No cloud transcription fallback is used.</p>
                 </div>
                 <label class="voki-speech-toggle" for="voki-speech-toggle">
                   <input id="voki-speech-toggle" type="checkbox" data-voki-speech-toggle aria-describedby="voki-speech-status" />
-                  <span>Read released responses aloud</span>
+                  <span class="sr-only">Read released responses aloud</span>
                 </label>
-                <p class="voki-speech-status" data-voki-speech-status role="status" aria-live="polite">Checking browser speech availability.</p>
+                <p class="voki-speech-status sr-only" data-voki-speech-status role="status" aria-live="polite">Checking browser speech availability.</p>
                 <div class="voki-proactive-controls" role="group" aria-label="VOKKI proactive speech controls">
                   <label class="voki-speech-toggle" for="voki-proactive-toggle">
                     <input id="voki-proactive-toggle" type="checkbox" data-voki-proactive-toggle aria-describedby="voki-proactive-status voki-proactive-privacy" />
-                    <span>Enable proactive announcements</span>
+                    <span class="sr-only">Enable proactive announcements</span>
                   </label>
                   <label class="voki-speech-toggle" for="voki-mute-toggle">
                     <input id="voki-mute-toggle" type="checkbox" data-voki-mute-toggle aria-describedby="voki-proactive-status" />
-                    <span>Mute VOKKI speech</span>
+                    <span class="sr-only">Mute VOKKI speech</span>
                   </label>
-                  <p class="voki-speech-status" data-voki-proactive-status id="voki-proactive-status" role="status" aria-live="polite">Proactive announcements are off.</p>
-                  <p class="voki-input-privacy" id="voki-proactive-privacy">When enabled, VOKKI may speak verified PARMAR chat results or a generic reminder for a verified pending approval, only while this page is visible and VOKKI is open. This choice lasts until the page reloads. No background listening is used; approval details and unreleased content are not spoken.</p>
+                  <p class="voki-speech-status sr-only" data-voki-proactive-status id="voki-proactive-status" role="status" aria-live="polite">Proactive announcements are off.</p>
+                  <p class="voki-input-privacy sr-only" id="voki-proactive-privacy">When enabled, VOKKI may speak verified PARMAR chat results or a generic reminder for a verified pending approval, only while this page is visible and VOKKI is open. This choice lasts until the page reloads. No background listening is used; approval details and unreleased content are not spoken.</p>
                 </div>
-                <button class="voki-stop-speech" type="button" data-voki-stop-speech hidden>Stop speaking</button>
+                <button class="voki-stop-speech" type="button" data-voki-stop-speech hidden><span class="sr-only">Stop speaking</span></button>
               </div>
               <details class="voki-identity-onboarding">
-                <summary><strong>Optional local reference</strong><span>Saved on this device only, with your approval</span></summary>
-                <p>A camera is not needed to use VOKKI. If you choose setup during an authenticated session, one still is captured on this device and saved only after your approval. It is isolated to that session, never uploaded, and never replaces VOKKI’s canonical portrait.</p>
-                <p class="voki-identity-status" data-voki-identity-status role="status" aria-live="polite" tabindex="-1">Sign in to associate an approved local reference with this session.</p>
+                <summary><strong class="sr-only">Optional local reference</strong><span class="sr-only">Saved on this device only, with your approval</span></summary>
+                <p class="sr-only">A camera is not needed to use VOKKI. If you choose setup during an authenticated session, one still is captured on this device and saved only after your approval. It is isolated to that session, never uploaded, and never replaces VOKKI’s canonical portrait.</p>
+                <p class="voki-identity-status sr-only" data-voki-identity-status role="status" aria-live="polite" tabindex="-1">Sign in to associate an approved local reference with this session.</p>
                 <video class="voki-identity-video" data-voki-identity-video autoplay muted playsinline hidden aria-label="Temporary local camera preview"></video>
                 <img class="voki-identity-preview" data-voki-identity-preview alt="" hidden />
                 <div class="voki-identity-actions">
-                  <button type="button" data-voki-identity-start>Set up an optional visual reference</button>
-                  <button type="button" data-voki-identity-enable hidden>Enable camera for this session</button>
-                  <button type="button" data-voki-identity-capture hidden>Capture one still</button>
-                  <button type="button" data-voki-identity-approve hidden>Approve and save on this device</button>
-                  <button type="button" data-voki-identity-retake hidden>Retake</button>
-                  <button type="button" data-voki-identity-cancel hidden>Cancel / Not now</button>
-                  <button type="button" data-voki-identity-remove hidden>Remove saved reference</button>
+                  <button type="button" data-voki-identity-start><span class="sr-only">Set up an optional visual reference</span></button>
+                  <button type="button" data-voki-identity-enable hidden><span class="sr-only">Enable camera for this session</span></button>
+                  <button type="button" data-voki-identity-capture hidden><span class="sr-only">Capture one still</span></button>
+                  <button type="button" data-voki-identity-approve hidden><span class="sr-only">Approve and save on this device</span></button>
+                  <button type="button" data-voki-identity-retake hidden><span class="sr-only">Retake</span></button>
+                  <button type="button" data-voki-identity-cancel hidden><span class="sr-only">Cancel / Not now</span></button>
+                  <button type="button" data-voki-identity-remove hidden><span class="sr-only">Remove saved reference</span></button>
                 </div>
               </details>
               <div class="voki-interface-approval" data-voki-approval hidden aria-live="polite">
-                <span class="approval-eyebrow">A decision is yours</span>
-                <strong class="approval-waiting-title">PARMAR is waiting for your decision.</strong>
-                <p data-voki-approval-message></p>
+                <span class="approval-eyebrow sr-only">A decision is yours</span>
+                <strong class="approval-waiting-title sr-only">PARMAR is waiting for your decision.</strong>
+                <p class="sr-only" data-voki-approval-message></p>
                 <div class="voki-interface-actions">
-                  <button class="approve-btn" type="button" data-voki-decision="APPROVE">Approve</button>
-                  <button class="reject-btn" type="button" data-voki-decision="REJECT">Reject</button>
+                  <button class="approve-btn" type="button" data-voki-decision="APPROVE"><span class="sr-only">Approve</span></button>
+                  <button class="reject-btn" type="button" data-voki-decision="REJECT"><span class="sr-only">Reject</span></button>
                 </div>
               </div>
               <form class="voki-interface-form" data-voki-form>
@@ -309,12 +309,12 @@
                 <textarea id="voki-interface-input" data-voki-input rows="3" maxlength="12000" placeholder="What would you like PARMAR to consider?"></textarea>
                 <label class="composer-research" title="Use the configured research provider when available">
                   <input type="checkbox" data-voki-research aria-describedby="voki-research-help" />
-                  <span>Research</span>
+                  <span class="sr-only">Research</span>
                 </label>
                 <span class="sr-only" id="voki-research-help">Request research through the configured search provider. PARMAR safety and approval checks still apply.</span>
-                <button class="primary-btn" type="submit" data-voki-submit><span>Send to PARMAR</span><span class="button-arrow" aria-hidden="true">↗</span></button>
+                <button class="primary-btn" type="submit" data-voki-submit><span class="sr-only">Send to PARMAR</span><span class="button-arrow" aria-hidden="true">↗</span></button>
               </form>
-              <p class="voki-interface-note">Voice input requires supported on-device speech recognition and an installed local language pack. VOKKI does not make safety decisions or execute actions.</p>
+              <p class="voki-interface-note sr-only">Voice input requires supported on-device speech recognition and an installed local language pack. VOKKI does not make safety decisions or execute actions.</p>
             </section>
           </section>
 
@@ -736,7 +736,7 @@
         <footer class="workspace-footer"><span>PARMAR</span><span>Safety review, never automatic authority.</span><span id="outcome-footer">Human-led</span></footer>
       </div>
       <button class="voki-ecosystem-launcher" type="button" data-section="voki" data-voki-ecosystem-presence data-presence-state="unknown" aria-label="Open VOKKI workspace. PARMAR lifecycle: STATE UNAVAILABLE.">
-        <img src="/static/assets/voki/default-avatar.png" alt="" aria-hidden="true" />
+        <img src="/static/assets/voki/Vokki.png" alt="" aria-hidden="true" />
         <span class="voki-ecosystem-copy"><strong>VOKKI</strong><span>Open workspace</span></span>
         <span class="voki-ecosystem-state" data-voki-ecosystem-state aria-live="polite">State unavailable</span>
       </button>

@@ -285,7 +285,7 @@ def test_voki_and_chat_share_server_selected_conversation_without_history_replay
     )
     assert new_chat and restore and select
     assert 'data-voki-home-avatar' in html_source
-    assert 'data-voki-default-image src="/static/assets/voki/default-avatar.png"' in html_source
+    assert 'data-voki-default-image src="/static/assets/voki/Vokki.png"' in html_source
     assert 'data-section="voki"' in html_source
     assert 'aria-label="VOKKI interface"' in html_source
     assert "button.dataset.section === 'voki'" in app_source
@@ -558,7 +558,7 @@ def test_vokki_identity_uses_real_lifecycle_and_not_a_speaking_orb_for_local_dem
 
     assert "PARMAR / YOUR PERSONAL AI" in html_source
     assert "data-voki-home-avatar" in html_source
-    assert "data-voki-default-image src=\"/static/assets/voki/default-avatar.png\"" in html_source
+    assert "data-voki-default-image src=\"/static/assets/voki/Vokki.png\"" in html_source
     assert "state.homeVokiAvatar?.setLifecycle" in app_source
     assert "DEFAULT_VOKKI_IDENTITY" in avatar_source
     assert 'id="section-chat"' in html_source
