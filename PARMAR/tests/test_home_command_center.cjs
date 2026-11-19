@@ -35,9 +35,12 @@ test('Home matches the reference-led dashboard while Core and VOKKI remain separ
   assert.match(home, /id="home-clock"/);
   assert.match(home, /Weather<br \/>not connected/);
   assert.match(home, /Needs your attention/);
-  for (const action of ['Ask Anything', 'Search Web', 'Open AETHER', 'View Memory', 'Run Research', 'Use Simulator', 'Request Approval', 'System Settings']) {
+  for (const action of ['Ask Anything', 'Research in Chat', 'Open AETHER', 'View Memory', 'Talk to VOKKI', 'Use Simulator', 'Open Approvals', 'System Settings']) {
     assert.match(home, new RegExp(`>${action}<`));
   }
+  assert.equal((home.match(/data-action="research-chat"/g) || []).length, 1);
+  assert.match(home, /data-section="voki"><span class="home-quick-icon"/);
+  assert.doesNotMatch(home, />Search Web<|>Run Research<|>Request Approval</);
   assert.match(html, /id="global-search-input"/);
   assert.match(appSource, /No saved memories yet\./);
   assert.match(home, /data-voki-home-avatar/);
@@ -109,6 +112,12 @@ test('The expanded sidebar retains every original labeled navigation option and 
     ['Memory', 'memory'],
     ['Approvals', 'approvals'],
     ['Tools / Plugins', 'tools'],
+    ['Knowledge', 'knowledge'],
+    ['Learning', 'learning'],
+    ['Workflow', 'workflow'],
+    ['Agent Studio', 'agents'],
+    ['Integrations', 'integrations'],
+    ['Analytics', 'analytics'],
     ['System Status', 'system'],
     ['Settings', 'settings'],
     ['Phone Awareness', 'phone'],
@@ -168,6 +177,14 @@ test('Home actions navigate to the existing workflows', () => {
   assert.deepEqual(navigations.pop(), ['simulator', 'simulator']);
   navigate({ dataset: { section: 'safety' } });
   assert.deepEqual(navigations.pop(), ['safety', 'safety']);
+
+  navigate({ dataset: { section: 'voki' } });
+  assert.deepEqual(calls.splice(0), ['focus-voki']);
+  assert.deepEqual(navigations.pop(), ['voki', 'voki']);
+
+  navigate({ dataset: { section: 'approvals', navKey: 'approvals', homeFocus: 'approval' } });
+  assert.deepEqual(calls.splice(0), ['focus-approval']);
+  assert.deepEqual(navigations.pop(), ['approvals', 'approvals']);
 
   assert.match(functionSource('bindEvents'), /dom\.analyzeBtn\.addEventListener\('click', analyzeRequest\)/);
   assert.match(functionSource('analyzeRequest'), /apiRequest\('\/api\/analyze'/);
@@ -246,13 +263,11 @@ test('Home and dedicated VOKKI use the canonical avatar through the shared real 
   assert.match(avatarSource, /data-voki-default-image/);
   assert.deepEqual(avatarAsset.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   assert.deepEqual(avatarAsset, suppliedReference);
-  assert.equal((html.match(/src="\/static\/assets\/voki\/Vokki\.png"/g) || []).length, 3);
+  assert.equal((html.match(/src="\/static\/assets\/voki\/Vokki\.png"/g) || []).length, 2);
   const homeAvatar = html.match(/<div class="home-voki-presence"[\s\S]*?<\/div>/)?.[0];
   const workspaceAvatar = html.match(/<div class="voki-avatar"[\s\S]*?<\/div>/)?.[0];
-  const ecosystemLauncher = html.match(/<button class="voki-ecosystem-launcher"[\s\S]*?<\/button>/)?.[0];
   assert.match(homeAvatar || '', /src="\/static\/assets\/voki\/Vokki\.png"/);
   assert.match(workspaceAvatar || '', /src="\/static\/assets\/voki\/Vokki\.png"/);
-  assert.match(ecosystemLauncher || '', /src="\/static\/assets\/voki\/Vokki\.png"/);
   const homeComposer = html.match(/<form class="home-chat-composer"[\s\S]*?<\/form>/)?.[0];
   assert.ok(homeComposer);
   assert.doesNotMatch(homeComposer, /<img\b/);

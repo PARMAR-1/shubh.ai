@@ -466,31 +466,6 @@ test('ambiguous browser launch result quarantines instead of claiming RUNNING', 
     },
   });
 
-  test('unavailable cleanup confirmation quarantines and blocks later admission', async () => {
-    const harness = makeContract({
-      terminationAuthority: {
-        requestTermination: async () => {
-          throw new Error('termination result lost');
-        },
-      },
-    });
-    const { created } = await createRunningGeneration(harness, 'terminate-ambiguous');
-    await assert.rejects(terminateGeneration(harness, created.generationId, 'terminate-ambiguous'), {
-      code: 'COMPONENT_FAILURE',
-    });
-    const state = await harness.contract.dispatch(
-      request('queryGeneration', 'query-terminate-ambiguous', created.generationId),
-      harness.admission,
-    );
-    assert.equal(state.state, 'QUARANTINED');
-    await assert.rejects(
-      harness.contract.dispatch(
-        request('createGeneration', 'create-after-ambiguous-termination'),
-        harness.admission,
-      ),
-      { code: 'ADMISSION_BLOCKED' },
-    );
-  });
   const created = await harness.contract.dispatch(
     request('createGeneration', 'create-ambiguous'),
     harness.admission,
@@ -511,6 +486,32 @@ test('ambiguous browser launch result quarantines instead of claiming RUNNING', 
   await assert.rejects(
     harness.contract.dispatch(
       request('createGeneration', 'create-after-quarantine'),
+      harness.admission,
+    ),
+    { code: 'ADMISSION_BLOCKED' },
+  );
+});
+
+test('unavailable cleanup confirmation quarantines and blocks later admission', async () => {
+  const harness = makeContract({
+    terminationAuthority: {
+      requestTermination: async () => {
+        throw new Error('termination result lost');
+      },
+    },
+  });
+  const { created } = await createRunningGeneration(harness, 'terminate-ambiguous');
+  await assert.rejects(terminateGeneration(harness, created.generationId, 'terminate-ambiguous'), {
+    code: 'COMPONENT_FAILURE',
+  });
+  const state = await harness.contract.dispatch(
+    request('queryGeneration', 'query-terminate-ambiguous', created.generationId),
+    harness.admission,
+  );
+  assert.equal(state.state, 'QUARANTINED');
+  await assert.rejects(
+    harness.contract.dispatch(
+      request('createGeneration', 'create-after-ambiguous-termination'),
       harness.admission,
     ),
     { code: 'ADMISSION_BLOCKED' },

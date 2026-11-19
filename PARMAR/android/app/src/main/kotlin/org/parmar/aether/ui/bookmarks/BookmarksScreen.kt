@@ -1,5 +1,7 @@
 package org.parmar.aether.ui.bookmarks
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -30,9 +32,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.error
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -58,11 +63,14 @@ fun BookmarksScreen(
     onHome: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val clipboardManager = LocalContext.current.getSystemService(ClipboardManager::class.java)
     var url by remember { mutableStateOf("") }
     var title by remember { mutableStateOf("") }
     var search by remember { mutableStateOf("") }
     var formMessage by remember { mutableStateOf<String?>(null) }
     var selectedBookmark by remember { mutableStateOf<Bookmark?>(null) }
+    var copiedBookmarkId by remember { mutableStateOf<String?>(null) }
+    var clipboardUnavailable by remember { mutableStateOf(false) }
     var editingBookmark by remember { mutableStateOf<Bookmark?>(null) }
     var removingBookmark by remember { mutableStateOf<Bookmark?>(null) }
     val visibleBookmarks = bookmarks.filter {
@@ -192,7 +200,11 @@ fun BookmarksScreen(
                 items(items = visibleBookmarks, key = Bookmark::id) { bookmark ->
                     BookmarkCard(
                         bookmark = bookmark,
-                        onDetails = { selectedBookmark = bookmark },
+                        onDetails = {
+                            copiedBookmarkId = null
+                            clipboardUnavailable = false
+                            selectedBookmark = bookmark
+                        },
                         onEdit = {
                             editingBookmark = bookmark
                             url = bookmark.url
@@ -223,14 +235,43 @@ fun BookmarksScreen(
             onDismissRequest = { selectedBookmark = null },
             title = { Text(bookmark.title) },
             text = {
-                Text(
-                    text = bookmark.url,
-                    color = AetherColors.textSecondary,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = bookmark.url,
+                        color = AetherColors.textSecondary,
+                    )
+                    when {
+                        clipboardUnavailable -> Text(
+                            text = "Clipboard is unavailable; the address was not copied.",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                        copiedBookmarkId == bookmark.id -> Text(
+                            text = "Address copied to clipboard.",
+                            color = AetherColors.accentCopper,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                    }
+                }
             },
             confirmButton = {
-                TextButton(onClick = { selectedBookmark = null }) {
-                    Text("Done")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = {
+                        val manager = clipboardManager
+                        if (manager == null) {
+                            clipboardUnavailable = true
+                            copiedBookmarkId = null
+                        } else {
+                            manager.setPrimaryClip(ClipData.newPlainText("Saved address", bookmark.url))
+                            clipboardUnavailable = false
+                            copiedBookmarkId = bookmark.id
+                        }
+                    }) {
+                        Text("Copy address")
+                    }
+                    TextButton(onClick = { selectedBookmark = null }) {
+                        Text("Done")
+                    }
                 }
             },
         )

@@ -296,9 +296,14 @@ test('browser supervisor enforces startup timeout and kills the child process gr
   const { supervisor, child, calls } = createSupervisor(undefined, {
     startupTimeoutMs: 100,
   });
+  const eventLoopLease = setInterval(() => {}, 1000);
   const exited = new Promise((resolve) => supervisor.on('exit', resolve));
-  await assert.rejects(supervisor.start(), /startup timed out/);
-  await exited;
+  try {
+    await assert.rejects(supervisor.start(), /startup timed out/);
+    await exited;
+  } finally {
+    clearInterval(eventLoopLease);
+  }
   assert.equal(supervisor.state, 'stopped');
   assert.ok(calls.some((call) => call[0] === 'kill' && call[1] === child.pid));
 });
@@ -379,16 +384,21 @@ test('browser supervisor retries a crashed child within its bounded recovery bud
 
   const firstStart = supervisor.start();
   children[0].stdout.write(childMessage(calls[0][2].env.PARMAR_AETHER_BROKER_CAPABILITY));
-  await firstStart;
-  const recoveryReady = new Promise((resolve) => supervisor.on('ready', resolve));
-  children[0].emit('close', 23, null);
-  await secondSpawn;
-  children[1].stdout.write(childMessage(calls[1][2].env.PARMAR_AETHER_BROKER_CAPABILITY));
-  await recoveryReady;
-  assert.equal(spawnCount, 2);
-  children[1].emit('close', 23, null);
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(spawnCount, 2);
+  const eventLoopLease = setInterval(() => {}, 1000);
+  try {
+    await firstStart;
+    const recoveryReady = new Promise((resolve) => supervisor.on('ready', resolve));
+    children[0].emit('close', 23, null);
+    await secondSpawn;
+    children[1].stdout.write(childMessage(calls[1][2].env.PARMAR_AETHER_BROKER_CAPABILITY));
+    await recoveryReady;
+    assert.equal(spawnCount, 2);
+    children[1].emit('close', 23, null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(spawnCount, 2);
+  } finally {
+    clearInterval(eventLoopLease);
+  }
   assert.equal(supervisor.state, 'stopped');
 });
 

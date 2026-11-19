@@ -20,9 +20,9 @@ module.exports = async function renderVisualReport() {
   const lines = [
     '# VOKKI automated visual acceptance',
     '',
-    `**Overall: ${overall}.** Screenshots are evidence, not automatic visual approval. Human review of the uploaded images remains **BLOCKED** until a reviewer inspects them.`,
+    `**Overall: ${overall}.** Automated status only; human visual review is required before marking acceptance PASS.`,
     '',
-    'Automated checks cover viewport overflow, primary-area clipping/overlap, canonical portrait loading, lifecycle copy, control state, keyboard focus, reduced motion, browser errors, and remote requests.',
+    'Automated checks cover viewport overflow, primary-area clipping/overlap, canonical portrait loading and rendered screenshot pixels, lifecycle copy, control state, keyboard focus, reduced motion, browser errors, and remote requests.',
     '',
     '| Viewport | Screenshot | State | Automated result | Findings |',
     '|---|---|---|---|---|',

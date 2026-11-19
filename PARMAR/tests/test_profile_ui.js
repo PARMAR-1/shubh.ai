@@ -21,9 +21,16 @@ class Element {
     this.disabled = false;
     this.value = '';
     this.textContent = '';
+    this.className = '';
     this.dataset = {};
     this.children = [];
+    this.attributes = {};
+    this.listeners = {};
     this.focusCount = 0;
+  }
+
+  addEventListener(type, listener) {
+    this.listeners[type] = listener;
   }
 
   replaceChildren(...children) {
@@ -33,6 +40,10 @@ class Element {
   appendChild(child) {
     this.children.push(child);
     return child;
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = value;
   }
 
   focus() {
@@ -244,4 +255,62 @@ test('creating a profile sends only its name, then selects it through the owners
   assert.equal(ui.state.activeProfileId, createdProfileId);
   assert.equal(ui.dom.profileNameInput.value, '');
   assert.equal(ui.refreshes.length, 1);
+});
+
+function makeHistoryStatusContext({ historyError, retryConversationId = null, historyLoading = false }) {
+  const calls = [];
+  const historyStatus = new Element();
+  const context = vm.createContext({
+    state: {
+      authMode: 'authenticated',
+      activeProfileId: '00000000-0000-4000-8000-000000000001',
+      historySelectionId: null,
+      historyLoading,
+      historyError,
+      historyRetryConversationId: retryConversationId,
+    },
+    dom: { historyStatus },
+    document: { createElement: () => new Element() },
+    historyStorageUnavailable: false,
+    refreshServerConversationHistory: () => calls.push(['retry-history']),
+    selectServerConversation: (id) => calls.push(['retry-conversation', id]),
+  });
+  vm.runInContext(
+    `${functionSource('renderHistoryStatus')}\nglobalThis.renderHistoryStatus = renderHistoryStatus;`,
+    context,
+  );
+  return { context, historyStatus, calls };
+}
+
+test('conversation history load errors expose an accessible retry action, while loading and ready states do not', () => {
+  const failedHistory = makeHistoryStatusContext({ historyError: true });
+  failedHistory.context.renderHistoryStatus();
+  const retryHistory = failedHistory.historyStatus.children[0];
+  assert.equal(retryHistory.textContent, 'Retry history');
+  assert.equal(retryHistory.attributes['aria-label'], 'Retry loading conversation history');
+  retryHistory.listeners.click();
+  assert.deepEqual(failedHistory.calls, [['retry-history']]);
+
+  const failedConversation = makeHistoryStatusContext({
+    historyError: true,
+    retryConversationId: '00000000-0000-4000-8000-000000000002',
+  });
+  failedConversation.context.renderHistoryStatus();
+  const retryConversation = failedConversation.historyStatus.children[0];
+  assert.equal(retryConversation.textContent, 'Retry conversation');
+  assert.equal(retryConversation.attributes['aria-label'], 'Retry loading this conversation');
+  retryConversation.listeners.click();
+  assert.deepEqual(failedConversation.calls, [
+    ['retry-conversation', '00000000-0000-4000-8000-000000000002'],
+  ]);
+
+  const loadingHistory = makeHistoryStatusContext({ historyError: false, historyLoading: true });
+  loadingHistory.context.renderHistoryStatus();
+  assert.equal(loadingHistory.historyStatus.textContent, 'Loading conversation history…');
+  assert.equal(loadingHistory.historyStatus.children.length, 0);
+
+  const readyHistory = makeHistoryStatusContext({ historyError: false });
+  readyHistory.context.renderHistoryStatus();
+  assert.equal(readyHistory.historyStatus.hidden, true);
+  assert.equal(readyHistory.historyStatus.children.length, 0);
 });

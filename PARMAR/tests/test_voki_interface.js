@@ -624,26 +624,15 @@ test('Home keeps the canonical VOKKI portrait and preserves optional local-refer
   assert.doesNotMatch(app, /classList\.add\('acknowledged'\)/);
 });
 
-test('PARMAR-wide VOKKI launcher opens its workspace and mirrors only lifecycle state', () => {
+test('PARMAR-wide VOKKI has no bottom destination launcher', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'interface', 'static', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'interface', 'static', 'app.js'), 'utf8');
-  const styles = fs.readFileSync(path.join(__dirname, '..', 'interface', 'static', 'premium.css'), 'utf8');
-  const launcher = new Element();
-  const state = new Element();
-  launcher.elements = { '[data-voki-ecosystem-state]': state };
-  const { instance } = makeInterface(async () => apiResponse({}), undefined, undefined, [launcher]);
-  instance.setPresence('WAITING_FOR_HUMAN');
+  const premiumStyles = fs.readFileSync(path.join(__dirname, '..', 'interface', 'static', 'premium.css'), 'utf8');
 
-  assert.equal(launcher.dataset.presenceState, 'approval-required');
-  assert.equal(state.textContent, 'APPROVAL REQUIRED');
-  assert.equal(launcher.attributes['aria-label'], 'Open VOKKI workspace. PARMAR lifecycle: APPROVAL REQUIRED.');
-
-  assert.match(html, /class="voki-ecosystem-launcher"[^>]*data-section="voki"[^>]*data-voki-ecosystem-presence/);
+  assert.doesNotMatch(html, /voki-ecosystem-launcher|mobile-bottom-nav|mobile-bottom-item/);
   assert.match(html, /PARMAR \/ VOKKI WORKSPACE/);
-  assert.match(app, /voki-ecosystem-launcher\[data-section\]/);
-  assert.match(app, /ecosystemPresence: document\.querySelectorAll\('\[data-voki-ecosystem-presence\]'\)/);
-  assert.match(styles, /body\[data-active-section="voki"\] \.voki-ecosystem-launcher\s*\{\s*display:\s*none;/);
-  assert.match(styles, /@media \(max-width: 760px\) \{\s*\.voki-ecosystem-launcher/);
+  assert.doesNotMatch(app, /voki-ecosystem-launcher|ecosystemPresence|mobile-bottom/);
+  assert.doesNotMatch(premiumStyles, /voki-ecosystem-launcher|mobile-bottom-nav/);
 });
 
 test('VOKKI approval decisions stay scoped to VOKKI and use the approval backend', () => {

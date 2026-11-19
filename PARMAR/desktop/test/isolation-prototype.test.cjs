@@ -181,6 +181,7 @@ test('mocked namespace setup failure rejects startup and cleans up the child', a
 test('mocked startup timeout kills the isolated process and fails closed', async () => {
   const child = new MockChild();
   let killed = false;
+  const eventLoopLease = setInterval(() => {}, 1000);
   const launcher = mockedLauncher({
     spawnProcess() { return child; },
     killProcessGroup() {
@@ -189,10 +190,14 @@ test('mocked startup timeout kills the isolated process and fails closed', async
     },
   });
 
-  await assert.rejects(
-    launcher.launch({ mode: 'offline', startupTimeoutMs: 100 }),
-    /startup timed out/,
-  );
+  try {
+    await assert.rejects(
+      launcher.launch({ mode: 'offline', startupTimeoutMs: 100 }),
+      /startup timed out/,
+    );
+  } finally {
+    clearInterval(eventLoopLease);
+  }
   assert.equal(killed, true);
 });
 

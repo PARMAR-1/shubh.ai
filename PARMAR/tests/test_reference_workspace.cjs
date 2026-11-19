@@ -9,6 +9,7 @@ const html = fs.readFileSync(path.join(staticDir, 'index.html'), 'utf8');
 const app = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 const styles = fs.readFileSync(path.join(staticDir, 'styles.css'), 'utf8');
 const premiumStyles = fs.readFileSync(path.join(staticDir, 'premium.css'), 'utf8');
+const designStyles = fs.readFileSync(path.join(staticDir, 'design-system.css'), 'utf8');
 
 function functionSource(name) {
   const match = app.match(new RegExp(`function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`));
@@ -38,14 +39,16 @@ class TestElement {
   }
 }
 
-test('primary workspace links use real Chat, Research, approval, and mobile navigation flows', () => {
+test('primary workspace links use real Chat, Research, approval, and side-drawer navigation flows', () => {
   assert.match(html, /data-section="research" data-nav-key="research" aria-label="Research"/);
   assert.match(html, /data-section="approvals" data-nav-key="approvals" data-home-focus="approval"/);
-  for (const section of ['home', 'chat', 'voki']) {
-    assert.match(html, new RegExp(`class="nav-item mobile-bottom-item"[^>]*data-section="${section}"`));
-  }
-  assert.match(html, /class="nav-item mobile-bottom-item mobile-bottom-more"[^>]*aria-controls="sidebar"[^>]*>[\s\S]*?<span>More<\/span>/);
-  assert.match(app, /dom\.mobileBottomMore\?\.addEventListener\('click', \(\) => dom\.sidebarToggle\?\.click\(\)\)/);
+  assert.doesNotMatch(html, /mobile-bottom-nav|mobile-bottom-item|mobile-bottom-more/);
+  assert.doesNotMatch(app, /mobileBottomMore|mobile-bottom-nav|mobile-bottom-item/);
+  assert.doesNotMatch(styles, /mobile-bottom-nav|mobile-bottom-item/);
+  assert.doesNotMatch(premiumStyles, /mobile-bottom-nav|mobile-bottom-item/);
+  assert.doesNotMatch(designStyles, /mobile-bottom-nav|mobile-bottom-item/);
+  assert.match(html, /id="sidebar-toggle"[^>]*aria-controls="sidebar"/);
+  assert.match(app, /dom\.sidebarToggle[\s\S]*?addEventListener\('click'/);
   assert.match(app, /if \(button\.dataset\.navKey\) selectSection\('chat', button\.dataset\.navKey\);\s*else selectSection\('chat'\)/);
   assert.match(app, /button\.dataset\.homeFocus === 'approval'/);
 });
@@ -89,8 +92,12 @@ test('Safety review displays honest empty and partially reported result states',
   );
 });
 
-test('VOKKI immersive layout is desktop-only so mobile navigation remains available', () => {
-  assert.match(styles, /@media \(min-width: 761px\) \{\s*body\[data-active-section="voki"\]/);
+test('VOKKI retains its accessible workspace exit without destination bottom navigation', () => {
+  assert.doesNotMatch(html, /mobile-bottom-nav|mobile-bottom-item|mobile-bottom-more/);
+  assert.doesNotMatch(styles, /mobile-bottom-nav|mobile-bottom-item/);
+  assert.doesNotMatch(designStyles, /mobile-bottom-nav|mobile-bottom-item/);
+  assert.doesNotMatch(premiumStyles, /mobile-bottom-nav|mobile-bottom-item/);
+  assert.match(html, /class="text-button voki-exit"[^>]*aria-label="Return to PARMAR workspace"/);
 });
 
 test('Research shows only stored conversation results and launches the real Chat research flow', () => {
@@ -124,7 +131,7 @@ test('reference surfaces retain VOKKI’s canonical provided portrait in Home an
   assert.match(styles, /\.voki-presence-stage/);
 });
 
-test('shared styling covers Home, Chat, VOKKI, memory, browser, settings, and mobile', () => {
+test('shared styling covers Home, Chat, VOKKI, memory, browser, settings, and mobile without bottom navigation', () => {
   for (const selector of [
     '.home-hero',
     '.conversation-surface',
@@ -139,6 +146,5 @@ test('shared styling covers Home, Chat, VOKKI, memory, browser, settings, and mo
   assert.match(styles, /\.conversation-surface\s*\{[\s\S]*?grid-template-columns:\s*minmax\(190px,\s*0\.27fr\)\s+minmax\(0,\s*0\.73fr\)/);
   assert.match(styles, /\.memory-preferences strong,[\s\S]*?\.memory-composer > label\s*\{\s*color:\s*var\(--type-primary\);/);
   assert.match(styles, /\.memory-preferences p,[\s\S]*?\.memory-empty p\s*\{\s*color:\s*var\(--type-secondary\);/);
-  assert.match(styles, /\.mobile-bottom-nav\s*\{[\s\S]*?position:\s*fixed/);
-  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.mobile-bottom-nav\s*\{[\s\S]*?display:\s*grid/);
+  assert.doesNotMatch(styles, /mobile-bottom-nav|mobile-bottom-item/);
 });

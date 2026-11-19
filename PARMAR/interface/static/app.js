@@ -3,6 +3,12 @@ const STORAGE_KEYS = {
   settings: 'parmar-settings-v1',
   audit: 'parmar-audit-v1',
   memories: 'parmar-memories-v1',
+  knowledge: 'parmar-knowledge-v1',
+  learning: 'parmar-learning-v1',
+  workflows: 'parmar-workflows-v1',
+  agents: 'parmar-agent-drafts-v1',
+  integrations: 'parmar-integration-drafts-v1',
+  marketplace: 'parmar-plugin-manifests-v1',
 };
 const ACTIVE_CONVERSATION_KEY = 'parmar-active-conversation-v1';
 const MAX_SAVED_MEMORIES = 25;
@@ -11,6 +17,7 @@ const DISCOVERY_DRAWER_BREAKPOINT = 1100;
 const PANEL_TRANSITION_MS = 260;
 const PANEL_EDGE_ZONE = 24;
 const PANEL_DIRECTION_LOCK = 10;
+const WORKFLOW_NODE_TYPES = new Set(['input', 'policy-review', 'approval-request', 'output']);
 const PROVIDER_IDS = new Set(['local-demo', 'openai', 'gemini', 'claude', 'http-json']);
 const PROFILE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RESPONSE_SAFETY_STATES = new Set(['PASS', 'REVIEW', 'BLOCK', 'UNCERTAIN', 'NOT_CHECKED']);
@@ -23,6 +30,7 @@ const responseSafetyLabels = {
   NOT_CHECKED: 'Response was not checked and is not shown.',
 };
 let historyStorageUnavailable = false;
+const foundationEditing = Object.create(null);
 const sensitiveMemoryPatterns = [
   /\b(?:password|passwd|pwd|passcode|secret|credential|api[\s_-]?key|access[\s_-]?token|refresh[\s_-]?token|auth(?:entication)?[\s_-]?token|client[\s_-]?secret)\b\s*(?:is|[:=])\s*\S+/i,
   /\bAuthorization\s*:\s*[^\r\n]*/i,
@@ -280,6 +288,8 @@ const dom = {
   pipelineEl: document.getElementById('pipeline'),
   riskCenterEl: document.getElementById('risk-center'),
   explanationList: document.getElementById('explanation-list'),
+  copyDecisionSummary: document.getElementById('copy-decision-summary'),
+  copyDecisionStatus: document.getElementById('copy-decision-status'),
   approvalAction: document.getElementById('approval-action'),
   approvalRisk: document.getElementById('approval-risk'),
   approvalConflicts: document.getElementById('approval-conflicts'),
@@ -355,7 +365,6 @@ const dom = {
   newSessionBtn: document.getElementById('new-session-btn'),
   sidebar: document.getElementById('sidebar'),
   sidebarToggle: document.getElementById('sidebar-toggle'),
-  mobileBottomMore: document.querySelector('.mobile-bottom-more'),
   sidebarClose: document.getElementById('sidebar-close'),
   mainPanel: document.querySelector('.main-panel'),
   discoveryPanel: document.getElementById('discovery-panel'),
@@ -384,6 +393,28 @@ const dom = {
   memoryCount: document.getElementById('memory-count'),
   memoryClearAll: document.getElementById('memory-clear-all'),
   memoryEmpty: document.getElementById('memory-empty'),
+  knowledgeForm: document.getElementById('knowledge-form'),
+  knowledgeSearch: document.getElementById('knowledge-search'),
+  knowledgeList: document.getElementById('knowledge-list'),
+  knowledgeEmpty: document.getElementById('knowledge-empty'),
+  learningForm: document.getElementById('learning-form'),
+  learningList: document.getElementById('learning-list'),
+  learningEmpty: document.getElementById('learning-empty'),
+  learningTotal: document.getElementById('learning-total'),
+  learningProgress: document.getElementById('learning-progress-list'),
+  learningProgressEmpty: document.getElementById('learning-progress-empty'),
+  workflowForm: document.getElementById('workflow-form'),
+  workflowList: document.getElementById('workflow-list'),
+  workflowEmpty: document.getElementById('workflow-empty'),
+  agentForm: document.getElementById('agent-form'),
+  agentList: document.getElementById('agent-list'),
+  agentEmpty: document.getElementById('agent-empty'),
+  integrationForm: document.getElementById('integration-form'),
+  integrationList: document.getElementById('integration-list'),
+  integrationEmpty: document.getElementById('integration-empty'),
+  marketplaceForm: document.getElementById('marketplace-form'),
+  marketplaceList: document.getElementById('marketplace-list'),
+  marketplaceEmpty: document.getElementById('marketplace-empty'),
   runScenario: document.getElementById('run-scenario'),
   runScenarioSecondary: document.getElementById('run-scenario-secondary'),
   loadDemo: document.getElementById('load-demo'),
@@ -453,6 +484,7 @@ const state = {
   serverConversationIds: new Set(),
   historyLoading: false,
   historyError: false,
+  historyRetryConversationId: null,
   historySelectionId: null,
   historyLoadGeneration: 0,
   historySelectionGeneration: 0,
@@ -485,6 +517,660 @@ function readJson(key, fallback) {
     if (key === STORAGE_KEYS.localDemoSessions) historyStorageUnavailable = true;
     return fallback;
   }
+}
+
+function writeLocalFoundation(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function readLocalFoundation(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    const value = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(value)) throw new TypeError('Saved data is not a list.');
+    return { records: value, error: null };
+  } catch (error) {
+    return { records: null, error };
+  }
+}
+
+function setFoundationStatus(module, message, isError = false) {
+  const status = document.getElementById(`${module}-status`);
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.state = isError ? 'error' : 'success';
+}
+
+function createFoundationItem(module, record, title, details, meta) {
+  const article = document.createElement('article');
+  article.className = 'local-foundation-item';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const detail = document.createElement('p');
+  detail.textContent = details;
+  article.append(heading, detail);
+  if (meta) {
+    const metaText = document.createElement('span');
+    metaText.textContent = meta;
+    article.append(metaText);
+  }
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'text-button local-foundation-edit';
+  edit.textContent = 'Edit';
+  edit.setAttribute('aria-label', `Edit ${title}`);
+  edit.dataset.foundationEdit = module;
+  edit.dataset.recordId = record.id;
+  article.append(edit);
+  return article;
+}
+
+function renderFoundationList(module, records, emptyMessage, formatter, query = '') {
+  const list = dom[`${module}List`];
+  const empty = dom[`${module}Empty`];
+  if (!list || !empty) return null;
+  if (!records) {
+    list.replaceChildren();
+    empty.hidden = false;
+    empty.textContent = `Saved ${module} data could not be read. It has not been changed.`;
+    setFoundationStatus(module, `Could not read saved ${module} data.`, true);
+    return null;
+  }
+  list.replaceChildren();
+  const normalized = query.trim().toLocaleLowerCase();
+  let visibleCount = 0;
+  let invalidCount = 0;
+  const validRecords = [];
+  for (const record of records) {
+    if (!record || typeof record.id !== 'string') {
+      invalidCount += 1;
+      continue;
+    }
+    let item;
+    try {
+      item = formatter(record);
+    } catch (_error) {
+      invalidCount += 1;
+      continue;
+    }
+    validRecords.push(record);
+    if (normalized && !`${item.title} ${item.details} ${item.meta}`.toLocaleLowerCase().includes(normalized)) continue;
+    list.append(createFoundationItem(module, record, item.title, item.details, item.meta));
+    visibleCount += 1;
+  }
+  empty.hidden = visibleCount > 0;
+  empty.textContent = invalidCount && validRecords.length === 0
+    ? 'Saved records could not be displayed. Stored data was left unchanged.'
+    : normalized
+      ? 'No saved items match this search.'
+      : emptyMessage;
+  if (invalidCount) {
+    setFoundationStatus(module, 'Some saved records are invalid and were not displayed. Stored data was left unchanged.', true);
+  }
+  return { records: validRecords, invalidCount };
+}
+
+function renderKnowledge(query = '') {
+  const { records } = readLocalFoundation(STORAGE_KEYS.knowledge);
+  return renderFoundationList(
+    'knowledge',
+    records,
+    'No documents saved in this browser.',
+    (record) => {
+      if (typeof record.title !== 'string' || typeof record.body !== 'string' || typeof record.category !== 'string') {
+        throw new TypeError('Invalid saved document.');
+      }
+      return {
+        title: record.title,
+        details: record.body,
+        meta: `${record.category} · Saved locally`,
+      };
+    },
+    query,
+  );
+}
+
+function renderLearning() {
+  const { records } = readLocalFoundation(STORAGE_KEYS.learning);
+  const displayed = renderFoundationList(
+    'learning',
+    records,
+    'No study sessions recorded.',
+    (record) => {
+      if (
+        typeof record.subject !== 'string'
+        || typeof record.topic !== 'string'
+        || !Number.isSafeInteger(record.minutes)
+        || record.minutes < 1
+        || record.minutes > 1440
+        || (record.notes !== undefined && typeof record.notes !== 'string')
+      ) throw new TypeError('Invalid saved study session.');
+      return {
+        title: `${record.subject} · ${record.topic}`,
+        details: record.notes || 'No notes entered.',
+        meta: `${record.minutes} minutes · Recorded locally`,
+      };
+    },
+  );
+  if (!displayed) {
+    if (dom.learningTotal) dom.learningTotal.textContent = '—';
+    dom.learningProgress?.replaceChildren();
+    if (dom.learningProgressEmpty) {
+      dom.learningProgressEmpty.hidden = false;
+      dom.learningProgressEmpty.textContent = 'Progress is unavailable because saved sessions could not be read.';
+    }
+    return;
+  }
+  if (displayed.invalidCount > 0) {
+    if (dom.learningTotal) dom.learningTotal.textContent = '—';
+    dom.learningProgress?.replaceChildren();
+    if (dom.learningProgressEmpty) {
+      dom.learningProgressEmpty.hidden = false;
+      dom.learningProgressEmpty.textContent = 'Progress totals are unavailable because one or more saved sessions are invalid.';
+    }
+    return;
+  }
+  let total = 0;
+  const topics = new Map();
+  for (const record of displayed.records) {
+    total += record.minutes;
+    const key = `${record.subject}\u0000${record.topic}`;
+    const progress = topics.get(key) || { subject: record.subject, topic: record.topic, minutes: 0, sessions: 0 };
+    progress.minutes += record.minutes;
+    progress.sessions += 1;
+    topics.set(key, progress);
+  }
+  if (dom.learningTotal) dom.learningTotal.textContent = String(total);
+  if (dom.learningProgress && dom.learningProgressEmpty) {
+    dom.learningProgress.replaceChildren();
+    for (const progress of topics.values()) {
+      const article = document.createElement('article');
+      article.className = 'local-foundation-item';
+      const heading = document.createElement('strong');
+      heading.textContent = `${progress.subject} · ${progress.topic}`;
+      const detail = document.createElement('p');
+      detail.textContent = `${progress.sessions} saved ${progress.sessions === 1 ? 'session' : 'sessions'} · ${progress.minutes} entered ${progress.minutes === 1 ? 'minute' : 'minutes'}`;
+      const source = document.createElement('span');
+      source.textContent = 'Derived from saved study sessions; no goal or completion percentage is configured.';
+      article.append(heading, detail, source);
+      dom.learningProgress.append(article);
+    }
+    dom.learningProgressEmpty.hidden = topics.size > 0;
+    dom.learningProgressEmpty.textContent = 'No study progress is available until you record a session.';
+  }
+}
+
+function renderWorkflow() {
+  const { records } = readLocalFoundation(STORAGE_KEYS.workflows);
+  renderFoundationList(
+    'workflow',
+    records,
+    'No workflow drafts saved.',
+    (record) => {
+      if (typeof record.name !== 'string' || !Array.isArray(record.nodes)) {
+        throw new TypeError('Invalid saved workflow.');
+      }
+      return {
+        title: record.name,
+        details: record.nodes.map((node) => (
+          typeof node === 'string'
+            ? node
+            : `${node.type}: ${node.name} | ${node.configuration}`
+        )).join(' → '),
+        meta: record.nodes.every((node) => node && typeof node === 'object' && node.configuration)
+          ? 'VALIDATED LOCAL DRAFT · NOT EXECUTABLE'
+          : 'LEGACY DRAFT · CONFIGURATION REQUIRED · NOT EXECUTABLE',
+      };
+    },
+  );
+}
+
+function renderAgents() {
+  const { records } = readLocalFoundation(STORAGE_KEYS.agents);
+  renderFoundationList(
+    'agent',
+    records,
+    'No agent drafts saved.',
+    (record) => {
+      if (
+        typeof record.name !== 'string'
+        || typeof record.role !== 'string'
+        || !Array.isArray(record.permissions)
+        || record.permissions.some((permission) => !['local-memory', 'local-files'].includes(permission))
+      ) throw new TypeError('Invalid saved agent draft.');
+      return {
+        title: record.name,
+        details: record.role,
+        meta: `${record.permissions.join(', ') || 'No permissions requested'} · CONFIGURATION DRAFT · NOT EXECUTABLE`,
+      };
+    },
+  );
+}
+
+function renderIntegrations() {
+  const { records } = readLocalFoundation(STORAGE_KEYS.integrations);
+  renderFoundationList(
+    'integration',
+    records,
+    'No connection drafts saved.',
+    (record) => {
+      if (
+        typeof record.name !== 'string'
+        || !Array.isArray(record.permissions)
+        || record.permissions.some((permission) => typeof permission !== 'string')
+      ) throw new TypeError('Invalid saved integration request.');
+      return {
+        title: record.name,
+        details: record.permissions.join(', ') || 'No permissions requested',
+        meta: 'CONNECTION DRAFT · NOT CONNECTED',
+      };
+    },
+  );
+}
+
+function renderMarketplace() {
+  const { records } = readLocalFoundation(STORAGE_KEYS.marketplace);
+  renderFoundationList(
+    'marketplace',
+    records,
+    'No verified plugin listings are available. Submitted metadata remains unverified.',
+    (record) => {
+      if (
+        typeof record.name !== 'string'
+        || typeof record.source !== 'string'
+        || !Array.isArray(record.permissions)
+        || record.permissions.some((permission) => typeof permission !== 'string')
+      ) throw new TypeError('Invalid plugin metadata.');
+      return {
+        title: record.name,
+        details: record.source,
+        meta: `${record.metadataValid ? 'METADATA VALID · ' : ''}UNVERIFIED · METADATA ONLY · ${record.permissions.join(', ') || 'No permissions declared'} · INSTALLATION DISABLED`,
+      };
+    },
+  );
+}
+
+const foundationEditorConfig = {
+  knowledge: {
+    key: STORAGE_KEYS.knowledge,
+    form: 'knowledgeForm',
+    maxRecords: 100,
+    fields: ['knowledge-title-input', 'knowledge-category-input', 'knowledge-body-input'],
+    submitLabel: 'Save document',
+    editLabel: 'Update document',
+    render: renderKnowledge,
+  },
+  learning: {
+    key: STORAGE_KEYS.learning,
+    form: 'learningForm',
+    maxRecords: 500,
+    fields: ['learning-subject-input', 'learning-topic-input', 'learning-notes-input', 'learning-minutes-input'],
+    submitLabel: 'Record study session',
+    editLabel: 'Update study session',
+    render: renderLearning,
+  },
+  workflow: {
+    key: STORAGE_KEYS.workflows,
+    form: 'workflowForm',
+    maxRecords: 100,
+    fields: ['workflow-name-input', 'workflow-nodes-input', 'workflow-connections-input'],
+    submitLabel: 'Validate and save',
+    editLabel: 'Update validated draft',
+    render: renderWorkflow,
+  },
+  agent: {
+    key: STORAGE_KEYS.agents,
+    form: 'agentForm',
+    maxRecords: 100,
+    fields: ['agent-name-input', 'agent-role-input'],
+    submitLabel: 'Save draft',
+    editLabel: 'Update draft',
+    render: renderAgents,
+  },
+  integration: {
+    key: STORAGE_KEYS.integrations,
+    form: 'integrationForm',
+    maxRecords: 100,
+    fields: ['integration-name-input', 'integration-permissions-input'],
+    submitLabel: 'Save connection draft',
+    editLabel: 'Update connection draft',
+    render: renderIntegrations,
+  },
+  marketplace: {
+    key: STORAGE_KEYS.marketplace,
+    form: 'marketplaceForm',
+    maxRecords: 100,
+    fields: ['marketplace-name-input', 'marketplace-source-input', 'marketplace-permissions-input'],
+    submitLabel: 'Validate metadata',
+    editLabel: 'Update metadata',
+    render: renderMarketplace,
+  },
+};
+
+function foundationForm(module) {
+  return dom[foundationEditorConfig[module]?.form];
+}
+
+function setFoundationEditorMode(module, editing) {
+  const form = foundationForm(module);
+  const config = foundationEditorConfig[module];
+  if (!form || !config) return;
+  const submit = form.querySelector('button[type="submit"]');
+  const cancel = form.querySelector('[data-foundation-cancel]');
+  if (submit) submit.textContent = editing ? config.editLabel : config.submitLabel;
+  if (cancel) cancel.hidden = !editing;
+}
+
+function cancelFoundationEdit(module, announce = true) {
+  const form = foundationForm(module);
+  if (!form) return;
+  const wasEditing = Boolean(foundationEditing[module]);
+  delete foundationEditing[module];
+  form.reset();
+  setFoundationEditorMode(module, false);
+  for (const fieldId of foundationEditorConfig[module].fields) {
+    document.getElementById(fieldId)?.removeAttribute('aria-invalid');
+  }
+  if (announce && wasEditing) setFoundationStatus(module, 'Editing cancelled. The saved record was not changed.');
+}
+
+function reportFoundationValidation(module, fieldId, message) {
+  setFoundationStatus(module, message, true);
+  const field = document.getElementById(fieldId);
+  field?.setAttribute('aria-invalid', 'true');
+  field?.focus();
+}
+
+function setDecisionSummaryAvailability(available) {
+  if (!dom.copyDecisionSummary) return;
+  dom.copyDecisionSummary.disabled = !available;
+  if (!available && dom.copyDecisionStatus) dom.copyDecisionStatus.textContent = '';
+}
+
+async function copyDecisionSummary() {
+  if (!dom.copyDecisionSummary || dom.copyDecisionSummary.disabled || !dom.copyDecisionStatus) return;
+  if (!navigator.clipboard?.writeText) {
+    dom.copyDecisionStatus.textContent = 'Clipboard access is unavailable in this browser.';
+    return;
+  }
+  const explanations = Array.from(dom.explanationList?.querySelectorAll('li') || [])
+    .map((item) => item.textContent.trim())
+    .filter(Boolean);
+  const summary = sanitizeSensitiveText([
+    'PARMAR review summary (as displayed)',
+    `Status: ${dom.systemState?.textContent || 'Not reported'}`,
+    `Risk: ${dom.riskLevel?.textContent || 'Not reported'}`,
+    `Human approval: ${dom.approvalState?.textContent || 'Not reported'}`,
+    `Outcome: ${dom.outcomeState?.textContent || 'Not reported'}`,
+    `Proposal: ${dom.approvalAction?.textContent || 'Not reported'}`,
+    `PARMAR message: ${dom.statusMessage?.textContent || 'Not reported'}`,
+    'Decision context:',
+    ...(explanations.length ? explanations : ['No decision context was reported.']),
+  ].join('\n'));
+  try {
+    await navigator.clipboard.writeText(summary);
+    dom.copyDecisionStatus.textContent = 'Current PARMAR review summary copied. This does not approve or execute anything.';
+  } catch (_error) {
+    dom.copyDecisionStatus.textContent = 'Could not copy the review summary. No approval or action was taken.';
+  }
+}
+
+function parsePermissionDeclarations(raw) {
+  const permissions = raw.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const normalized = new Set();
+  for (const permission of permissions) {
+    const key = permission.toLocaleLowerCase();
+    if (permission.length > 160 || /[\u0000-\u001f\u007f]/.test(permission)) {
+      return { permissions: null, error: 'Each permission declaration must be 160 characters or fewer and contain no control characters.' };
+    }
+    if (normalized.has(key)) {
+      return { permissions: null, error: 'Permission declarations must be unique.' };
+    }
+    normalized.add(key);
+  }
+  return { permissions, error: null };
+}
+
+function parseWorkflowNodes(raw) {
+  const lines = raw.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const nodes = [];
+  const names = new Set();
+  for (const line of lines) {
+    const [descriptor, ...configurationParts] = line.split('|');
+    const separator = descriptor.indexOf(':');
+    if (separator < 0 || configurationParts.length === 0) {
+      return { nodes: null, error: 'Configure each node as “type: name | configuration”.' };
+    }
+    const type = descriptor.slice(0, separator).trim().toLocaleLowerCase();
+    const name = descriptor.slice(separator + 1).trim();
+    const configuration = configurationParts.join('|').trim();
+    if (!WORKFLOW_NODE_TYPES.has(type)) {
+      return { nodes: null, error: 'Use a supported node type: input, policy-review, approval-request, or output.' };
+    }
+    if (!name || name.length > 80 || !configuration || configuration.length > 500) {
+      return { nodes: null, error: 'Every node needs a name (up to 80 characters) and configuration (up to 500 characters).' };
+    }
+    const normalizedName = name.toLocaleLowerCase();
+    if (names.has(normalizedName)) return { nodes: null, error: 'Node names must be unique.' };
+    names.add(normalizedName);
+    nodes.push({ type, name, configuration });
+  }
+  return { nodes, error: null };
+}
+
+function readFoundationForm(module) {
+  const value = (id) => document.getElementById(id)?.value.trim() || '';
+  if (module === 'knowledge') {
+    const title = value('knowledge-title-input');
+    const body = value('knowledge-body-input');
+    if (!title) return { error: 'Enter a document title.', fieldId: 'knowledge-title-input' };
+    if (!body) return { error: 'Enter document content before saving.', fieldId: 'knowledge-body-input' };
+    return {
+      record: {
+        title,
+        category: value('knowledge-category-input') || 'General',
+        body,
+      },
+    };
+  }
+  if (module === 'learning') {
+    const subject = value('learning-subject-input');
+    const topic = value('learning-topic-input');
+    const minutes = Number(value('learning-minutes-input'));
+    if (!subject) return { error: 'Enter a subject.', fieldId: 'learning-subject-input' };
+    if (!topic) return { error: 'Enter a topic.', fieldId: 'learning-topic-input' };
+    if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1440) {
+      return { error: 'Study time must be a whole number from 1 to 1440 minutes.', fieldId: 'learning-minutes-input' };
+    }
+    return {
+      record: {
+        subject,
+        topic,
+        notes: value('learning-notes-input'),
+        minutes,
+      },
+    };
+  }
+  if (module === 'workflow') {
+    const name = value('workflow-name-input');
+    if (!name) return { error: 'Enter a workflow name.', fieldId: 'workflow-name-input' };
+    const { nodes, error: nodeError } = parseWorkflowNodes(value('workflow-nodes-input'));
+    if (nodeError) return { error: nodeError, fieldId: 'workflow-nodes-input' };
+    if (nodes.length < 2) {
+      return { error: 'Add at least two configured nodes before saving.', fieldId: 'workflow-nodes-input' };
+    }
+    const connections = value('workflow-connections-input').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!connections.length) {
+      return { error: 'Connect at least two nodes before saving.', fieldId: 'workflow-connections-input' };
+    }
+    const names = new Set(nodes.map((node) => node.name.toLocaleLowerCase()));
+    const normalizedConnections = new Set();
+    for (const connection of connections) {
+      const parts = connection.split('->').map((part) => part.trim());
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        return { error: 'Use “Source node -> Destination node” for each connection.', fieldId: 'workflow-connections-input' };
+      }
+      const [from, to] = parts;
+      if (!names.has(from.toLocaleLowerCase()) || !names.has(to.toLocaleLowerCase())) {
+        return { error: `Connection “${connection}” refers to a node that does not exist.`, fieldId: 'workflow-connections-input' };
+      }
+      if (from.toLocaleLowerCase() === to.toLocaleLowerCase()) {
+        return { error: `Connection “${connection}” cannot connect a node to itself.`, fieldId: 'workflow-connections-input' };
+      }
+      const key = `${from.toLocaleLowerCase()}->${to.toLocaleLowerCase()}`;
+      if (normalizedConnections.has(key)) {
+        return { error: `Connection “${connection}” is duplicated.`, fieldId: 'workflow-connections-input' };
+      }
+      normalizedConnections.add(key);
+    }
+    return { record: { name, nodes, connections, valid: true } };
+  }
+  if (module === 'agent') {
+    const name = value('agent-name-input');
+    const role = value('agent-role-input');
+    if (!name) return { error: 'Enter an agent draft name.', fieldId: 'agent-name-input' };
+    if (!role) return { error: 'Describe the draft’s role and boundaries.', fieldId: 'agent-role-input' };
+    const permissions = Array.from(foundationForm(module).querySelectorAll('input[name="agent-permission"]:checked'))
+      .map((input) => input.value);
+    return { record: { name, role, permissions } };
+  }
+  if (module === 'integration' || module === 'marketplace') {
+    const isMarketplace = module === 'marketplace';
+    const nameId = isMarketplace ? 'marketplace-name-input' : 'integration-name-input';
+    const permissionsId = isMarketplace ? 'marketplace-permissions-input' : 'integration-permissions-input';
+    const name = value(nameId);
+    if (!name) return { error: 'Enter a name before saving this draft.', fieldId: nameId };
+    const source = isMarketplace ? value('marketplace-source-input') : '';
+    if (isMarketplace && !/^(?:[\w.-]+\/[\w.-]+|https:\/\/[A-Za-z0-9.-]+(?:\/[^\s]*)?)$/.test(source)) {
+      return {
+        error: 'Enter a repository name (owner/repository) or an HTTPS source URL. No source is contacted.',
+        fieldId: 'marketplace-source-input',
+      };
+    }
+    const parsedPermissions = parsePermissionDeclarations(value(permissionsId));
+    if (parsedPermissions.error) return { error: parsedPermissions.error, fieldId: permissionsId };
+    if (isMarketplace) {
+      return {
+        record: { name, source, permissions: parsedPermissions.permissions, reviewStatus: 'UNVERIFIED', metadataValid: true },
+      };
+    }
+    return { record: { name, permissions: parsedPermissions.permissions, status: 'draft' } };
+  }
+  return { error: 'This draft type is unavailable.' };
+}
+
+function editFoundationRecord(module, id) {
+  const config = foundationEditorConfig[module];
+  const form = foundationForm(module);
+  if (!config || !form) return;
+  const { records, error } = readLocalFoundation(config.key);
+  if (error) {
+    setFoundationStatus(module, `Could not read the saved ${module} draft.`, true);
+    return;
+  }
+  const record = records.find((item) => item?.id === id);
+  if (!record) {
+    setFoundationStatus(module, `The saved ${module} draft could not be found.`, true);
+    config.render();
+    return;
+  }
+  cancelFoundationEdit(module, false);
+  if (module === 'knowledge') {
+    document.getElementById('knowledge-title-input').value = record.title;
+    document.getElementById('knowledge-category-input').value = record.category;
+    document.getElementById('knowledge-body-input').value = record.body;
+  } else if (module === 'learning') {
+    document.getElementById('learning-subject-input').value = record.subject;
+    document.getElementById('learning-topic-input').value = record.topic;
+    document.getElementById('learning-notes-input').value = record.notes || '';
+    document.getElementById('learning-minutes-input').value = String(record.minutes);
+  } else if (module === 'workflow') {
+    document.getElementById('workflow-name-input').value = record.name;
+    document.getElementById('workflow-nodes-input').value = record.nodes
+      .map((node) => typeof node === 'string' ? node : `${node.type}: ${node.name} | ${node.configuration}`)
+      .join('\n');
+    document.getElementById('workflow-connections-input').value = record.connections.join('\n');
+  } else if (module === 'agent') {
+    document.getElementById('agent-name-input').value = record.name;
+    document.getElementById('agent-role-input').value = record.role;
+    for (const permission of form.querySelectorAll('input[name="agent-permission"]')) {
+      permission.checked = record.permissions.includes(permission.value);
+    }
+  } else if (module === 'integration') {
+    document.getElementById('integration-name-input').value = record.name;
+    document.getElementById('integration-permissions-input').value = record.permissions.join('\n');
+  } else if (module === 'marketplace') {
+    document.getElementById('marketplace-name-input').value = record.name;
+    document.getElementById('marketplace-source-input').value = record.source;
+    document.getElementById('marketplace-permissions-input').value = record.permissions.join('\n');
+  }
+  foundationEditing[module] = id;
+  setFoundationEditorMode(module, true);
+  setFoundationStatus(module, 'Saved configuration loaded for editing. Changes are not saved until you update the draft.');
+  document.getElementById(config.fields[0])?.focus();
+}
+
+function saveFoundationRecord(module) {
+  const config = foundationEditorConfig[module];
+  const form = foundationForm(module);
+  if (!config || !form) return;
+  for (const fieldId of config.fields) document.getElementById(fieldId)?.removeAttribute('aria-invalid');
+  const { record, error, fieldId } = readFoundationForm(module);
+  if (error || !record) {
+    reportFoundationValidation(module, fieldId || config.fields[0], error || 'Review the draft fields and try again.');
+    return;
+  }
+  const { records, error: readError } = readLocalFoundation(config.key);
+  if (readError) {
+    setFoundationStatus(module, `Could not read saved ${module} data. No changes were saved.`, true);
+    return;
+  }
+  const editingId = foundationEditing[module];
+  const existing = editingId ? records.find((item) => item?.id === editingId) : null;
+  if (editingId && !existing) {
+    setFoundationStatus(module, `The saved ${module} draft could not be found. No changes were saved.`, true);
+    delete foundationEditing[module];
+    setFoundationEditorMode(module, false);
+    return;
+  }
+  const now = Date.now();
+  const savedRecord = {
+    ...existing,
+    ...record,
+    id: existing?.id || crypto.randomUUID(),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  const nextRecords = existing
+    ? records.map((item) => item.id === existing.id ? savedRecord : item)
+    : [savedRecord, ...records].slice(0, config.maxRecords);
+  if (!writeLocalFoundation(config.key, nextRecords)) {
+    setFoundationStatus(module, `Could not save this ${module} draft in this browser. Your form remains available for retry.`, true);
+    return;
+  }
+  delete foundationEditing[module];
+  form.reset();
+  setFoundationEditorMode(module, false);
+  setFoundationStatus(
+    module,
+    module === 'knowledge'
+      ? 'Document saved locally.'
+      : module === 'learning'
+        ? 'Study session saved locally from the activity you entered.'
+        : module === 'workflow'
+          ? 'Validated draft saved locally. Workflows cannot execute.'
+          : module === 'agent'
+            ? 'Configuration draft saved locally. It is not an executable agent.'
+            : module === 'integration'
+              ? 'Connection request saved locally. No provider is connected.'
+              : 'Metadata saved locally. This listing remains unverified and non-installable.',
+  );
+  config.render();
 }
 
 function readActiveConversationId() {
@@ -630,6 +1316,7 @@ function beginRequest() {
   if (state.requestInFlight || state.authMode === 'checking' || state.logoutInProgress) return null;
   state.requestSequence += 1;
   setRequestPending(true);
+  setDecisionSummaryAvailability(false);
   return state.requestSequence;
 }
 
@@ -873,6 +1560,7 @@ function clearProfileConversationState() {
   state.historySelectionId = null;
   state.historyLoading = false;
   state.historyError = false;
+  state.historyRetryConversationId = null;
   state.pendingApprovalId = null;
   state.conversationId = null;
   state.currentSessionId = null;
@@ -1473,7 +2161,7 @@ function panelElement(side) {
 
 function panelTriggers(side) {
   return side === 'left'
-    ? [dom.sidebarToggle, dom.mobileBottomMore]
+    ? [dom.sidebarToggle]
     : [dom.discoveryToggle, ...dom.discoveryTriggers];
 }
 
@@ -1508,8 +2196,6 @@ function syncWorkspaceAccessibility(activeSide = null) {
         trigger.setAttribute('aria-label', compact
           ? expanded ? 'Close navigation' : 'Open navigation'
           : expanded ? 'Collapse navigation' : 'Expand navigation');
-      } else if (trigger === dom.mobileBottomMore) {
-        trigger.setAttribute('aria-label', expanded ? 'Close navigation' : 'Open more navigation');
       } else if (trigger === dom.discoveryToggle) {
         trigger.setAttribute('aria-label', expanded ? 'Close Discovery' : 'Open Discovery');
       }
@@ -2644,23 +3330,7 @@ function renderHistory() {
     })
     .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0));
 
-  if (dom.historyStatus) {
-    const statusText = state.authMode === 'authenticated'
-      ? !state.activeProfileId
-        ? 'Select an owned profile to view its conversations.'
-        : state.historySelectionId
-        ? 'Loading conversation…'
-        : state.historyLoading
-          ? 'Loading conversation history…'
-          : state.historyError
-            ? 'Conversation history could not be loaded. Please try again.'
-            : ''
-      : historyStorageUnavailable
-        ? 'Conversation history is unavailable in this browser. Existing data could not be read or saved.'
-        : '';
-    dom.historyStatus.hidden = !statusText;
-    dom.historyStatus.textContent = statusText;
-  }
+  renderHistoryStatus();
 
   dom.historyList.replaceChildren();
   if (!conversations.length) {
@@ -2729,6 +3399,46 @@ function renderHistory() {
     dom.historyList.appendChild(item);
   });
   syncChatHistoryList();
+}
+
+function renderHistoryStatus() {
+  if (!dom.historyStatus) return;
+  const statusText = state.authMode === 'authenticated'
+    ? !state.activeProfileId
+      ? 'Select an owned profile to view its conversations.'
+      : state.historySelectionId
+        ? 'Loading conversation…'
+        : state.historyLoading
+          ? 'Loading conversation history…'
+          : state.historyError
+            ? state.historyRetryConversationId
+              ? 'This conversation could not be loaded.'
+              : 'Conversation history could not be loaded.'
+            : ''
+    : historyStorageUnavailable
+      ? 'Conversation history is unavailable in this browser. Existing data could not be read or saved.'
+      : '';
+  dom.historyStatus.hidden = !statusText;
+  dom.historyStatus.textContent = statusText;
+  if (state.authMode !== 'authenticated' || !state.historyError) return;
+
+  const retryConversationId = state.historyRetryConversationId;
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.className = 'history-retry text-button';
+  retryButton.textContent = retryConversationId ? 'Retry conversation' : 'Retry history';
+  retryButton.setAttribute(
+    'aria-label',
+    retryConversationId ? 'Retry loading this conversation' : 'Retry loading conversation history',
+  );
+  retryButton.addEventListener('click', () => {
+    if (retryConversationId) {
+      void selectServerConversation(retryConversationId);
+    } else {
+      void refreshServerConversationHistory();
+    }
+  });
+  dom.historyStatus.appendChild(retryButton);
 }
 
 function syncChatHistoryList() {
@@ -3177,6 +3887,7 @@ async function refreshServerConversationHistory({ navigateToChat = true } = {}) 
     state.historyLoadGeneration += 1;
     state.historyLoading = false;
     state.historyError = false;
+    state.historyRetryConversationId = null;
     state.sessions = [];
     state.serverConversationIds.clear();
     state.currentSessionId = null;
@@ -3190,6 +3901,7 @@ async function refreshServerConversationHistory({ navigateToChat = true } = {}) 
   const authEpoch = state.authEpoch;
   state.historyLoading = true;
   state.historyError = false;
+  state.historyRetryConversationId = null;
   renderHistory();
   let restoreConversationId = null;
   try {
@@ -3234,6 +3946,7 @@ async function refreshServerConversationHistory({ navigateToChat = true } = {}) 
   } catch (_error) {
     if (generation === state.historyLoadGeneration && authEpoch === state.authEpoch && state.authMode === 'authenticated') {
       state.historyError = true;
+      state.historyRetryConversationId = null;
     }
   } finally {
     if (generation === state.historyLoadGeneration && authEpoch === state.authEpoch && state.authMode === 'authenticated') {
@@ -3254,6 +3967,7 @@ async function selectServerConversation(conversationId, { navigateToChat = true 
   const authEpoch = state.authEpoch;
   state.historySelectionId = conversationId;
   state.historyError = false;
+  state.historyRetryConversationId = null;
   renderHistory();
   try {
     const response = await apiRequest(`/api/conversations/${encodeURIComponent(conversationId)}`, { cache: 'no-store' });
@@ -3292,6 +4006,7 @@ async function selectServerConversation(conversationId, { navigateToChat = true 
   } catch (_error) {
     if (generation === state.historySelectionGeneration && authEpoch === state.authEpoch && state.authMode === 'authenticated') {
       state.historyError = true;
+      state.historyRetryConversationId = conversationId;
     }
   } finally {
     if (generation === state.historySelectionGeneration && authEpoch === state.authEpoch && state.authMode === 'authenticated') {
@@ -3324,9 +4039,11 @@ function renderReviewEmptyState(container, message) {
 
 function resetReviewState(message = 'PARMAR is ready for a request.') {
   state.pendingApprovalId = null;
+  setDecisionSummaryAvailability(false);
   setVokiState('UNKNOWN');
   setBadge('UNKNOWN');
   document.body.dataset.state = 'UNKNOWN';
+  setDecisionSummaryAvailability(false);
   if (dom.riskLevel) dom.riskLevel.textContent = '—';
   if (dom.approvalState) dom.approvalState.textContent = 'Not assessed';
   if (dom.outcomeState) dom.outcomeState.textContent = 'Not assessed';
@@ -3903,6 +4620,7 @@ function updateState(result, scenarioSimulation = false, recordAudit = true) {
   renderRiskCenter(resolved.data);
   renderExplainability(resolved.data);
   renderApproval(resolved.data);
+  setDecisionSummaryAvailability(true);
   document.body.dataset.state = resolved.lifecycleState;
   state.pendingApprovalId = analysis.approval_id || result?.approval_id || null;
 
@@ -3914,6 +4632,7 @@ function updateState(result, scenarioSimulation = false, recordAudit = true) {
 }
 
 function showRequestUnavailable(message) {
+  setDecisionSummaryAvailability(false);
   setVokiState('UNKNOWN');
   setBadge('UNAVAILABLE');
   document.body.dataset.state = 'UNAVAILABLE';
@@ -4358,6 +5077,30 @@ function bindEvents() {
   window.addEventListener('parmar-aether-status-changed', renderSystemOverview);
   updateHomeClock();
   window.setInterval(() => updateHomeClock(), 30_000);
+  renderKnowledge();
+  renderLearning();
+  renderWorkflow();
+  renderAgents();
+  renderIntegrations();
+  renderMarketplace();
+  dom.knowledgeSearch?.addEventListener('input', () => renderKnowledge(dom.knowledgeSearch.value));
+  for (const [module, config] of Object.entries(foundationEditorConfig)) {
+    const form = foundationForm(module);
+    form?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      saveFoundationRecord(module);
+    });
+    form?.querySelector('[data-foundation-cancel]')?.addEventListener('click', () => cancelFoundationEdit(module));
+    dom[`${module}List`]?.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-foundation-edit]');
+      if (button) editFoundationRecord(module, button.dataset.recordId);
+    });
+    form?.addEventListener('input', (event) => {
+      if (event.target instanceof HTMLElement) event.target.removeAttribute('aria-invalid');
+    });
+    setFoundationEditorMode(module, false);
+  }
+  dom.copyDecisionSummary?.addEventListener('click', () => { void copyDecisionSummary(); });
   dom.globalSearchInput?.addEventListener('input', () => {
     renderHomeSearchResults(dom.globalSearchInput.value);
   });
@@ -4411,7 +5154,7 @@ function bindEvents() {
     void createAuthenticatedProfile(event);
   });
 
-  document.querySelectorAll('.nav-item, .sidebar-brand[data-section], .text-button[data-section], .text-button[data-action], .workspace-launch[data-section], .capability-button[data-section], .capability-button[data-action], .capability-menu [data-section], .composer-voki[data-section], .home-action[data-section], .home-action[data-action], .home-voki-action[data-section], .home-quick-grid [data-section], .home-quick-grid [data-action], .home-dashboard-card [data-section], .home-quote-card[data-section], .settings-workspace-link[data-section], .settings-workspace-link[data-action], .voki-ecosystem-launcher[data-section]').forEach((button) => {
+  document.querySelectorAll('.nav-item, .sidebar-brand[data-section], .text-button[data-section], .text-button[data-action], .workspace-launch[data-section], .capability-button[data-section], .capability-button[data-action], .capability-menu [data-section], .composer-voki[data-section], .home-action[data-section], .home-action[data-action], .home-voki-action[data-section], .home-quick-grid [data-section], .home-quick-grid [data-action], .home-dashboard-card [data-section], .home-quote-card[data-section], .settings-workspace-link[data-section], .settings-workspace-link[data-action]').forEach((button) => {
     button.addEventListener('click', () => navigateWorkspaceAction(button));
   });
   dom.settingsLogoutBtn?.addEventListener('click', () => dom.logoutBtn?.click());
@@ -4504,7 +5247,6 @@ function bindEvents() {
   if (dom.sidebarToggle) {
     dom.sidebarToggle.addEventListener('click', () => toggleWorkspacePanel('left', dom.sidebarToggle));
   }
-  dom.mobileBottomMore?.addEventListener('click', () => dom.sidebarToggle?.click());
 
   dom.discoveryToggle?.addEventListener('click', () => {
     toggleWorkspacePanel('right', dom.discoveryToggle);
@@ -4693,6 +5435,7 @@ function bindEvents() {
       state.historySelectionGeneration += 1;
       state.historyLoading = false;
       state.historyError = false;
+      state.historyRetryConversationId = null;
       state.historySelectionId = null;
       state.currentSessionId = null;
       state.conversationId = null;
@@ -4899,7 +5642,6 @@ function initialize() {
       getLanguage: () => dom.languageSelect?.value || state.settings.language,
       beginRequest,
       finishRequest,
-      ecosystemPresence: document.querySelectorAll('[data-voki-ecosystem-presence]'),
     });
   }
   bindEvents();

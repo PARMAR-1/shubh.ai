@@ -95,7 +95,6 @@
       voiceInputAdapterFactory,
       getLocalConversation,
       appendLocalConversationMessage,
-      ecosystemPresence = [],
     }) {
       if (!element || typeof request !== 'function') {
         throw new TypeError('VOKKI interface requires a root element and a request function.');
@@ -105,7 +104,6 @@
       this.getLanguage = getLanguage || (() => 'en');
       this.getLocalConversation = getLocalConversation || (() => null);
       this.appendLocalConversationMessage = appendLocalConversationMessage || (() => false);
-      this.ecosystemPresence = Array.from(ecosystemPresence);
       this.beginRequest = beginRequest || (() => true);
       this.finishRequest = finishRequest || (() => {});
       this.input = element.querySelector('[data-voki-input]');
@@ -700,15 +698,6 @@
         this.presence.setAttribute('aria-label', `VOKKI presence: ${lifecycleLabels[state]}`);
       }
       if (this.presenceLabel) this.presenceLabel.textContent = lifecycleLabels[state];
-      this.ecosystemPresence.forEach((launcher) => {
-        launcher.dataset.presenceState = visualState;
-        launcher.setAttribute(
-          'aria-label',
-          `Open VOKKI workspace. PARMAR lifecycle: ${lifecycleLabels[state]}.`,
-        );
-        const status = launcher.querySelector('[data-voki-ecosystem-state]');
-        if (status) status.textContent = lifecycleLabels[state];
-      });
     }
 
     handleSpeechState({ state, boundary }) {

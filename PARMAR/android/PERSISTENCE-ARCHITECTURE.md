@@ -21,7 +21,9 @@ the Android application has been built or run.
   version and surface a storage error rather than returning an empty fallback.
 - [`BookmarksScreen.kt`](app/src/main/kotlin/org/parmar/aether/ui/bookmarks/BookmarksScreen.kt)
   provides add/edit/search, local details, saved-URL-tab creation, and
-  confirmation before removal. There is no Open/Visit action.
+  confirmation before removal. Details offers an explicit Copy address action
+  to the Android clipboard; it does not open the saved URL or make a request.
+  There is no Open/Visit action.
 
 ### Tabs
 
@@ -266,10 +268,12 @@ metadata remains excluded and is not an M1 feature.
 ### Local boundary and backups
 
 Keep the database and any future DataStore in app-private storage. Do not add
-sync, account services, telemetry, external storage, export, or import. The
-manifest disables backup and provides explicit database exclusions for cloud
-backup and device transfer. Merged-manifest and device behavior still require
-verification on supported Android versions.
+sync, account services, telemetry, external storage, or bulk export/import. The
+explicit user-triggered clipboard copy is a system handoff of the selected URL;
+clipboard contents may be accessible to other apps and are not private storage.
+The manifest disables backup and provides explicit database exclusions for
+cloud backup and device transfer. Merged-manifest and device behavior still
+require verification on supported Android versions.
 
 Treat bookmark URLs and titles as sensitive metadata. Never store browser
 credentials, cookies, authentication headers, provider secrets, page content,
