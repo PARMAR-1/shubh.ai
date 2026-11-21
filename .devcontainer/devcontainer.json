@@ -3,7 +3,20 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "24.22.1"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12.8",
+      "installTools": false
+    }
+  },
   "remoteUser": "vscode",
+  "postCreateCommand": "python -m venv /home/vscode/.local/share/parmar-test-venv && /home/vscode/.local/share/parmar-test-venv/bin/python -m pip install --disable-pip-version-check --requirement PARMAR/requirements.txt",
+  "remoteEnv": {
+    "PATH": "/home/vscode/.local/share/parmar-test-venv/bin:${containerEnv:PATH}"
+  },
   "containerEnv": {
     "JAVA_HOME": "/opt/java/temurin-17.0.21+9",
     "ANDROID_HOME": "/opt/android-sdk",

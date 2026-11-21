@@ -10,45 +10,37 @@ const app = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 const styles = fs.readFileSync(path.join(staticDir, 'styles.css'), 'utf8');
 
 const categories = [
-  'account',
-  'personalization',
-  'appearance',
-  'language',
   'general',
   'notifications',
-  'voice',
-  'memory',
-  'privacy',
-  'safety',
-  'integrations',
-  'models',
-  'research',
-  'storage',
-  'shortcuts',
-  'help',
-  'about',
-  'advanced',
+  'personalization',
+  'speech-audio',
+  'data-controls',
+  'developer-profile',
+  'connected-apps',
+  'security',
+  'subscription',
+  'devices-sessions',
+  'network-offline',
+  'system-diagnostics',
+  'updates',
+  'about-support',
 ];
 
 const categoryPanels = {
-  account: ['account'],
-  personalization: ['personalization'],
-  appearance: ['appearance'],
-  language: ['language'],
-  general: ['general'],
+  general: ['account-preferences', 'general', 'appearance', 'language', 'shortcuts'],
   notifications: ['notifications'],
-  voice: ['voice'],
-  memory: ['memory'],
-  privacy: ['security', 'history', 'privacy', 'ads'],
-  safety: ['safety'],
-  integrations: ['tools', 'remote-control'],
-  models: ['providers'],
-  research: ['workspace'],
-  storage: ['storage'],
-  shortcuts: ['shortcuts'],
-  help: ['help'],
-  about: ['about'],
-  advanced: ['devices', 'diagnostics'],
+  personalization: ['personalization', 'ads'],
+  'speech-audio': ['voice'],
+  'data-controls': ['history', 'privacy', 'memory', 'storage'],
+  'connected-apps': ['tools', 'remote-control'],
+  security: ['security', 'safety'],
+  'devices-sessions': ['account', 'devices'],
+  'network-offline': ['workspace', 'providers'],
+  'system-diagnostics': ['diagnostics'],
+  'developer-profile': ['developer-profile'],
+  subscription: ['subscription'],
+  updates: ['updates'],
+  'about-support': ['help', 'about'],
 };
 
 function functionSource(name, nextName) {
@@ -83,11 +75,38 @@ function settingsMarkup() {
   return { tabs, panels };
 }
 
+test('primary navigation follows the approved order and logout stays separated', () => {
+  const primaryNav = html.match(/<nav class="nav" aria-label="Primary navigation">([\s\S]*?)<\/nav>/)?.[1] || '';
+  const destinations = Array.from(primaryNav.matchAll(/data-primary-navigation="([^"]+)"/g), (match) => match[1]);
+  assert.deepEqual(destinations, ['home', 'chats', 'voki', 'aether', 'marketplace', 'learning']);
+  const completeNavigation = Array.from(html.matchAll(/data-primary-navigation="([^"]+)"/g), (match) => match[1]);
+  assert.deepEqual(completeNavigation, ['home', 'chats', 'voki', 'aether', 'marketplace', 'learning', 'logout']);
+  assert.match(html, /data-section="marketplace" data-primary-navigation="marketplace"/);
+  assert.match(html, /data-section="learning" data-nav-key="learning" data-primary-navigation="learning" aria-label="Learning Workspace"/);
+  assert.match(html, /data-section="marketplace"[^>]*id="section-marketplace"/);
+  assert.match(html, /Marketplace discovery, security verification, installation, publisher reviews, and uninstall lifecycle are not implemented/);
+  assert.doesNotMatch(html, /data-section="tools" data-primary-navigation="marketplace"/);
+  assert.doesNotMatch(html, /data-section="integrations"/);
+  assert.match(html, /<button class="nav-item" data-section="customize" aria-label="Customize"/);
+  assert.match(html, /<button class="nav-item" data-section="settings" aria-label="Settings"/);
+  assert.doesNotMatch(primaryNav, /data-primary-navigation="core"/);
+  const secondaryNav = html.match(/<details class="sidebar-workspaces" id="sidebar-workspaces">([\s\S]*?)<\/details>/)?.[1] || '';
+  assert.match(secondaryNav, /data-section="settings"/);
+  assert.match(secondaryNav, /data-section="customize"/);
+  assert.doesNotMatch(secondaryNav, /data-section="learning"/);
+  assert.match(html, /id="new-session-btn"[^>]*aria-label="New Chat"/);
+  assert.match(html, /<details class="sidebar-workspaces" id="sidebar-workspaces">/);
+  assert.match(html, /data-section="core"[^>]*aria-label="Decision review"/);
+  const sidebarFooter = html.match(/<div class="sidebar-footer">([\s\S]*?)<\/div>/)?.[1] || '';
+  assert.match(sidebarFooter, /id="logout-btn"[^>]*data-primary-navigation="logout"[^>]*aria-label="Logout"[^>]*title="Logout"[^>]*hidden/);
+  assert.match(app, /dom\.logoutBtn\?\.addEventListener\('click', logoutAuthenticatedSession\)/);
+});
+
 test('Settings categories map to dedicated detail-page panels accessibly', () => {
   const { tabs, panels } = settingsMarkup();
 
   assert.deepEqual(tabs.map((tab) => tab.category), categories);
-  assert.equal(panels.length, 23);
+  assert.equal(panels.length, 27);
   assert.equal(new Set(tabs.map((tab) => tab.id)).size, categories.length);
   assert.equal(new Set(panels.map((panel) => panel.id)).size, panels.length);
 
@@ -103,15 +122,15 @@ test('Settings categories map to dedicated detail-page panels accessibly', () =>
     );
   }
   assert.ok(panels.every((panel) => panel.hidden));
-  const categoryMarkup = html.match(/<nav class="settings-category-nav"[\s\S]*?<\/nav>/)?.[0] || '';
+  const categoryMarkup = html.match(/<nav class="settings-category-nav" id="settings-category-nav"[\s\S]*?<\/nav>/)?.[0] || '';
   assert.equal((categoryMarkup.match(/class="settings-category-icon"[^>]*><svg /g) || []).length, categories.length);
   assert.match(html, /id="settings-home-view"/);
   assert.match(html, /id="settings-detail-view"[^>]*hidden/);
   assert.match(html, /id="settings-back-button"[^>]*aria-label="Back to Settings" title="Back to Settings"/);
   assert.match(html, /id="settings-page-title" tabindex="-1"/);
-  assert.match(html, /<nav class="settings-category-nav" aria-label="Settings categories">/);
+  assert.match(html, /<nav class="settings-category-nav" id="settings-category-nav" aria-label="Settings categories">/);
   assert.doesNotMatch(categoryMarkup, />\s*\d{1,2}\s*</);
-  for (const label of ['Appearance', 'Language', 'AI &amp; Models', 'Research', 'Keyboard Shortcuts', 'Help', 'About PARMAR']) {
+  for (const label of ['General', 'Notifications', 'Personalization', 'Speech &amp; Audio', 'Data Controls', 'Connected Apps', 'Security', 'Devices &amp; Sessions', 'Network &amp; Offline', 'System Diagnostics', 'Developer Profile', 'Subscription', 'Updates', 'About &amp; Support']) {
     assert.ok(html.includes(`<span>${label}</span>`), `Missing category ${label}`);
   }
   assert.match(html, /id="settings-enter-to-send"/);
@@ -119,6 +138,53 @@ test('Settings categories map to dedicated detail-page panels accessibly', () =>
   assert.match(html, /id="settings-memory-state"/);
   assert.match(html, /id="settings-memory-count"/);
   assert.equal((html.match(/<li><span>[^<]+<\/span><span>[\s\S]*?<\/span><\/li>/g) || []).length >= 6, true);
+});
+
+test('Customize exposes exactly nine supported sections and keeps drafts separate from Marketplace', () => {
+  const nav = html.match(/<nav class="settings-category-nav customize-section-nav"[^>]*>([\s\S]*?)<\/nav>/)?.[1] || '';
+  const sections = Array.from(nav.matchAll(/aria-controls="([^"]+)" data-customize-category="([^"]+)"/g), (match) => ({
+    panelId: match[1],
+    category: match[2],
+  }));
+  assert.deepEqual(sections.map((section) => section.category), [
+    'personalization',
+    'custom-instructions',
+    'ai-behavior',
+    'tools-capabilities',
+    'integrations',
+    'memory-preferences',
+    'custom-profiles',
+    'permissions-approvals',
+    'default-working-preferences',
+  ]);
+  assert.deepEqual(
+    Array.from(nav.matchAll(/<span>([A-Za-z][^<]*)<\/span><\/button>/g), (match) => match[1]),
+    [
+      'Personalization',
+      'Custom Instructions',
+      'AI Behavior',
+      'Tools &amp; Capabilities',
+      'Integrations',
+      'Memory Preferences',
+      'Custom Profiles',
+      'Permissions &amp; Approvals',
+      'Default Working Preferences',
+    ],
+  );
+  assert.equal(new Set(sections.map((section) => section.panelId)).size, 9);
+  for (const section of sections) {
+    assert.match(html, new RegExp(`<section class="settings-panel customize-panel" id="${section.panelId}" data-customize-panel="${section.category}"`));
+  }
+  assert.match(html, /id="settings-response-length"/);
+  assert.match(html, /id="settings-response-style"/);
+  assert.match(html, /id="settings-custom-instructions"/);
+  assert.match(html, /id="integration-form"/);
+  assert.match(html, /id="marketplace-form"/);
+  assert.match(html, /id="section-marketplace"/);
+  assert.doesNotMatch(html, /id="section-tools"|id="section-integrations"/);
+  assert.match(html, /id="customize-search"[^>]*aria-controls="customize-search-results"/);
+  assert.match(app, /dom\.customizeSearch\?\.addEventListener\('input', \(\) => renderCustomizeSearch\(dom\.customizeSearch\.value\)\)/);
+  assert.match(app, /function navigateCustomizeCategory\(button/);
 });
 
 test('category routes support direct loading, browser back/forward, and arrow-only back navigation', () => {
@@ -176,7 +242,8 @@ test('category routes support direct loading, browser back/forward, and arrow-on
     dom,
     document: { body: { dataset: { activeSection: 'chat' } } },
     SETTINGS_CATEGORY_IDS: new Set(categories),
-    WORKSPACE_SECTION_IDS: new Set(['home', 'chat', 'settings']),
+    SETTINGS_CATEGORY_ALIASES: new Map([['language', 'general']]),
+    WORKSPACE_SECTION_IDS: new Set(['home', 'chat', 'settings', 'customize']),
     currentSettingsCategory: null,
     settingsHomeScrollPosition: 0,
     motionIsReduced: () => true,
@@ -196,11 +263,11 @@ test('category routes support direct loading, browser back/forward, and arrow-on
   runtime.writeSettingsHistory(null);
   assert.match(window.location.href, /settings=home/);
   assert.equal(runtime.navigateSettingsCategory(categoryButtons[0]), true);
-  assert.match(window.location.href, /settings=account/);
+  assert.match(window.location.href, /settings=general/);
   assert.equal(dom.settingsHomeView.hidden, true);
   assert.equal(dom.settingsDetailView.hidden, false);
-  assert.equal(dom.settingsPageTitle.textContent, 'account');
-  assert.ok(settingsPanels.find((panel) => panel.id === 'settings-panel-account').hidden === false);
+  assert.equal(dom.settingsPageTitle.textContent, 'general');
+  assert.ok(settingsPanels.find((panel) => panel.id === 'settings-panel-general').hidden === false);
 
   routeHistory.back();
   runtime.restoreSettingsRoute({ state: routeHistory.state });
@@ -211,13 +278,14 @@ test('category routes support direct loading, browser back/forward, and arrow-on
   assert.equal(dom.settingsHomeView.hidden, true);
   assert.equal(dom.settingsDetailView.hidden, false);
   const historyLength = routeEntries.length;
-  runtime.writeSettingsHistory('account');
+  runtime.writeSettingsHistory('general');
   assert.equal(routeEntries.length, historyLength, 'Repeated route updates should not add duplicate history entries');
 
   routeEntries = [{ state: null, url: 'https://parmar.test/?settings=language' }];
   routeIndex = 0;
   runtime.restoreSettingsRoute(null);
-  assert.equal(dom.settingsPageTitle.textContent, 'language');
+  assert.equal(dom.settingsPageTitle.textContent, 'general');
+  assert.match(window.location.href, /settings=general/);
   assert.equal(routeHistory.state.parmarSettingsFromHome, false);
   assert.match(html, /id="settings-back-button"[^>]*aria-label="Back to Settings"[^>]*title="Back to Settings"[^>]*>\s*<svg/);
   assert.doesNotMatch(html.match(/id="settings-back-button"[\s\S]*?<\/button>/)?.[0] || '', />\s*Back to Settings\s*</);
@@ -229,16 +297,16 @@ test('Settings search indexes the requested destinations and normalizes multiwor
   vm.runInNewContext(functionSource('settingsSearchMatches', 'settingsSearchEntries'), runtime);
 
   for (const [query, expectedGroup] of [
-    ['language', 'language'],
-    ['dark mode', 'appearance'],
-    ['microphone', 'voice'],
-    ['memory', 'memory'],
+    ['language', 'general'],
+    ['dark mode', 'general'],
+    ['microphone', 'speech-audio'],
+    ['memory', 'data-controls'],
     ['notifications', 'notifications'],
-    ['logout', 'account'],
-    ['web search', 'research'],
-    ['keyboard shortcuts', 'shortcuts'],
+    ['logout', 'devices-sessions'],
+    ['web search', 'network-offline'],
+    ['keyboard shortcuts', 'general'],
     ['enter to send', 'general'],
-    ['restore preference defaults', 'storage'],
+    ['restore preference defaults', 'data-controls'],
   ]) {
     const matched = panels.some((panel) => (
       panel.group === expectedGroup
@@ -272,25 +340,20 @@ test('Settings search indexes the requested destinations and normalizes multiwor
 test('logout and web-search results focus only their existing actions', () => {
   const { tabs, panels } = settingsMarkup();
   const categoryLabels = {
-    account: 'Account',
-    personalization: 'Personalisation',
-    appearance: 'Appearance',
-    language: 'Language',
     general: 'General',
     notifications: 'Notifications',
-    voice: 'Voice & VOKKI',
-    memory: 'Memory',
-    privacy: 'Privacy & Security',
-    safety: 'AI Behaviour & Safety',
-    integrations: 'Integrations',
-    models: 'AI & Models',
-    research: 'Research',
-    storage: 'Storage & Offline',
-    shortcuts: 'Keyboard Shortcuts',
-    help: 'Help',
-    about: 'About PARMAR',
-    advanced: 'Advanced Settings',
-    general: 'General',
+    personalization: 'Personalization',
+    'speech-audio': 'Speech & Audio',
+    'data-controls': 'Data Controls',
+    'connected-apps': 'Connected Apps',
+    security: 'Security',
+    'devices-sessions': 'Devices & Sessions',
+    'network-offline': 'Network & Offline',
+    'system-diagnostics': 'System Diagnostics',
+    'developer-profile': 'Developer Profile',
+    subscription: 'Subscription',
+    updates: 'Updates',
+    'about-support': 'About & Support',
   };
   const categoryButtons = tabs.map((tab) => ({
     dataset: { settingsCategory: tab.category },
@@ -326,23 +389,23 @@ test('logout and web-search results focus only their existing actions', () => {
   const entries = runtime.settingsSearchEntries('logout')
     .filter((entry) => runtime.settingsSearchMatches('logout', entry.searchableText));
   assert.ok(entries.length > 0);
-  assert.ok(entries.every((entry) => entry.group === 'account' && entry.targetId === 'settings-logout-btn'));
-  const memory = runtime.settingsSearchEntries('memory').find((entry) => entry.group === 'memory');
+  assert.ok(entries.every((entry) => entry.group === 'devices-sessions' && entry.targetId === 'settings-logout-btn'));
+  const memory = runtime.settingsSearchEntries('memory').find((entry) => entry.panelId === 'settings-panel-memory');
   assert.equal(memory.targetId, 'settings-open-memory');
-  const voice = runtime.settingsSearchEntries('microphone').find((entry) => entry.group === 'voice');
+  const voice = runtime.settingsSearchEntries('microphone').find((entry) => entry.panelId === 'settings-panel-voice');
   assert.equal(voice.targetId, 'settings-open-voki-voice');
   const webSearch = runtime.settingsSearchEntries('web search')
     .find((entry) => entry.panelId === 'settings-panel-workspace');
   assert.equal(webSearch.targetId, 'settings-open-research');
   const resetPreferences = runtime.settingsSearchEntries('restore preference defaults')
-    .find((entry) => entry.group === 'storage');
+    .find((entry) => entry.panelId === 'settings-panel-storage');
   assert.equal(resetPreferences.targetId, 'settings-reset-local-preferences');
   const enterToSend = runtime.settingsSearchEntries('enter to send')
     .find((entry) => entry.group === 'general');
   assert.equal(enterToSend.targetId, 'settings-enter-to-send');
   const responseLength = runtime.settingsSearchEntries('response length')
     .find((entry) => entry.group === 'personalization');
-  assert.equal(responseLength.targetId, 'settings-response-length');
+  assert.equal(responseLength.targetId, '');
   assert.match(html, /id="settings-response-length"/);
   assert.match(html, /id="settings-response-style"/);
   assert.match(html, /id="settings-custom-instructions"/);
@@ -361,6 +424,33 @@ test('logout and web-search results focus only their existing actions', () => {
       .filter((entry) => runtime.settingsSearchMatches(unsupportedQuery, entry.searchableText));
     assert.equal(unsupportedEntries.length, 0, `Unsupported control "${unsupportedQuery}" must not be searchable`);
   }
+});
+
+test('Customize search routes to the existing browser-local behavior controls', () => {
+  const customizeNav = html.match(/<nav class="settings-category-nav customize-section-nav"[^>]*>([\s\S]*?)<\/nav>/)?.[1] || '';
+  const buttons = Array.from(customizeNav.matchAll(/aria-controls="([^"]+)" data-customize-category="([^"]+)"/g), (match) => ({
+    id: match[1],
+    category: match[2],
+  })).map((entry) => ({
+    dataset: { customizeCategory: entry.category },
+    textContent: entry.category,
+  }));
+  const panels = Array.from(html.matchAll(/<section class="settings-panel customize-panel" id="([^"]+)"[^>]*data-customize-panel="([^"]+)"[^>]*data-customize-search-terms="([^"]*)"/g), (match) => ({
+    id: match[1],
+    dataset: { customizePanel: match[2], customizeSearchTerms: match[3] },
+    querySelector(selector) {
+      if (selector === 'h2') return { textContent: match[2] };
+      if (selector === '.settings-panel-heading p') return { textContent: '' };
+      return null;
+    },
+  }));
+  const runtime = {
+    dom: { customizePanels: panels, customizeCategoryButtons: buttons },
+    settingsSearchMatches: (query, text) => query.split(/\s+/).every((term) => text.toLowerCase().includes(term)),
+  };
+  vm.runInNewContext(functionSource('customizeSearchEntries', 'renderCustomizeSearch'), runtime);
+  assert.equal(runtime.customizeSearchEntries('response length')[0].category, 'ai-behavior');
+  assert.equal(runtime.customizeSearchEntries('oauth integrations')[0].category, 'integrations');
 });
 
 test('personalisation values are validated from browser storage and sent on chat requests', () => {

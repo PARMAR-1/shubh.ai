@@ -322,7 +322,7 @@ const dom = {
   settingsMemoryState: document.getElementById('settings-memory-state'),
   settingsMemoryCount: document.getElementById('settings-memory-count'),
   settingsAccountState: document.getElementById('settings-account-state'),
-  settingsCategoryNav: document.querySelector('.settings-category-nav'),
+  settingsCategoryNav: document.getElementById('settings-category-nav'),
   settingsCategoryButtons: Array.from(document.querySelectorAll('[data-settings-category]')),
   settingsPanels: Array.from(document.querySelectorAll('[data-settings-panel]')),
   settingsSection: document.getElementById('section-settings'),
@@ -332,9 +332,15 @@ const dom = {
   settingsPageDescription: document.getElementById('settings-page-description'),
   settingsBackButton: document.getElementById('settings-back-button'),
   settingsSaveStatus: document.getElementById('settings-save-status'),
+  customizeSaveStatus: document.getElementById('customize-save-status'),
   settingsSearch: document.getElementById('settings-search'),
   settingsSearchResults: document.getElementById('settings-search-results'),
   settingsSearchStatus: document.getElementById('settings-search-status'),
+  customizeCategoryButtons: Array.from(document.querySelectorAll('#customize-category-nav [data-customize-category]')),
+  customizePanels: Array.from(document.querySelectorAll('[data-customize-panel]')),
+  customizeSearch: document.getElementById('customize-search'),
+  customizeSearchResults: document.getElementById('customize-search-results'),
+  customizeSearchStatus: document.getElementById('customize-search-status'),
   settingsLogoutBtn: document.getElementById('settings-logout-btn'),
   historyList: document.getElementById('history-list'),
   historyFilter: document.getElementById('history-filter'),
@@ -423,6 +429,7 @@ const dom = {
   vokiState: document.getElementById('voki-state'),
   providerStatus: document.getElementById('provider-status'),
   aetherDesktopStatus: document.getElementById('aether-desktop-status'),
+  aetherDesktopOpen: document.getElementById('aether-desktop-open'),
   systemLifecycleValue: document.getElementById('system-lifecycle-value'),
   systemProviderValue: document.getElementById('system-provider-value'),
   systemSessionValue: document.getElementById('system-session-value'),
@@ -499,6 +506,36 @@ const workspacePanels = { left: 'closed', right: 'closed' };
 const panelFocusOrigins = { left: null, right: null };
 const panelTransitionTimers = { left: null, right: null };
 const SETTINGS_CATEGORY_IDS = new Set(dom.settingsCategoryButtons.map((button) => button.dataset.settingsCategory));
+const SETTINGS_CATEGORY_ALIASES = new Map([
+  ['account', 'devices-sessions'],
+  ['appearance', 'general'],
+  ['language', 'general'],
+  ['voice', 'speech-audio'],
+  ['memory', 'data-controls'],
+  ['history', 'data-controls'],
+  ['privacy', 'data-controls'],
+  ['storage', 'data-controls'],
+  ['integrations', 'connected-apps'],
+  ['remote-control', 'connected-apps'],
+  ['tools', 'connected-apps'],
+  ['safety', 'security'],
+  ['devices', 'devices-sessions'],
+  ['models', 'network-offline'],
+  ['providers', 'network-offline'],
+  ['research', 'network-offline'],
+  ['workspace', 'network-offline'],
+  ['diagnostics', 'system-diagnostics'],
+  ['advanced', 'system-diagnostics'],
+  ['shortcuts', 'general'],
+  ['help', 'about-support'],
+  ['about', 'about-support'],
+  ['ads', 'personalization'],
+]);
+const CUSTOMIZE_CATEGORY_IDS = new Set(dom.customizeCategoryButtons.map((button) => button.dataset.customizeCategory));
+const CUSTOMIZE_CATEGORY_ALIASES = new Map([
+  ['tools-plugins', 'tools-capabilities'],
+  ['permissions', 'permissions-approvals'],
+]);
 const WORKSPACE_SECTION_IDS = new Set(dom.views.map((view) => view.dataset.section));
 let settingsHomeScrollPosition = 0;
 let currentSettingsCategory = null;
@@ -909,6 +946,7 @@ async function copyDecisionSummary() {
     `Outcome: ${dom.outcomeState?.textContent || 'Not reported'}`,
     `Proposal: ${dom.approvalAction?.textContent || 'Not reported'}`,
     `PARMAR message: ${dom.statusMessage?.textContent || 'Not reported'}`,
+    'Authority: Informational only; this summary does not approve or execute a proposal.',
     'Decision context:',
     ...(explanations.length ? explanations : ['No decision context was reported.']),
   ].join('\n'));
@@ -1274,24 +1312,23 @@ function resetLocalPreferences() {
 }
 
 function persistSettings(previousSettings = loadSettings()) {
+  const setSaveStatus = (status, message) => {
+    [dom.settingsSaveStatus, dom.customizeSaveStatus].filter(Boolean).forEach((element) => {
+      element.hidden = false;
+      element.textContent = message;
+      element.dataset.status = status;
+    });
+  };
   try {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
   } catch (_error) {
     state.settings = previousSettings;
     applySettings();
-    if (dom.settingsSaveStatus) {
-      dom.settingsSaveStatus.hidden = false;
-      dom.settingsSaveStatus.textContent = 'Could not save this browser preference. The previous value was restored; change it again to retry.';
-      dom.settingsSaveStatus.dataset.status = 'error';
-    }
+    setSaveStatus('error', 'Could not save this browser preference. The previous value was restored; change it again to retry.');
     return false;
   }
   applySettings();
-  if (dom.settingsSaveStatus) {
-    dom.settingsSaveStatus.hidden = false;
-    dom.settingsSaveStatus.textContent = 'Saved in this browser.';
-    dom.settingsSaveStatus.dataset.status = 'saved';
-  }
+  setSaveStatus('saved', 'Saved in this browser.');
   return true;
 }
 
@@ -2473,7 +2510,13 @@ function finishPanelGesture(event, cancelled = false) {
   if (cancelled) {
     if (!gesture.wasOpen && dom.panelScrim) dom.panelScrim.hidden = true;
   } else if (gesture.locked) {
-    if (shouldOpen) openWorkspacePanel(gesture.side, panelFocusOrigins[gesture.side] || document.activeElement);
+    if (shouldOpen && gesture.side === 'right' && !gesture.wasOpen) {
+      if (dom.panelScrim) dom.panelScrim.hidden = true;
+      selectSection('aether');
+      if (dom.aetherDesktopOpen && !dom.aetherDesktopOpen.hidden && !dom.aetherDesktopOpen.disabled) {
+        dom.aetherDesktopOpen.click();
+      }
+    } else if (shouldOpen) openWorkspacePanel(gesture.side, panelFocusOrigins[gesture.side] || document.activeElement);
     else if (gesture.wasOpen) closeWorkspacePanel(gesture.side);
     else {
       if (dom.panelScrim) dom.panelScrim.hidden = true;
@@ -2548,18 +2591,20 @@ function selectSection(sectionName, navKey = sectionName) {
 
   const sectionLabels = {
     home: 'Home',
-    core: 'PARMAR Core',
+    core: 'Decision review',
     approvals: 'Approvals',
     chat: 'Chats / History',
     research: 'Research',
     voki: 'VOKKI',
     aether: 'AETHER',
     safety: 'Risk & Safety',
+    learning: 'Learning Workspace',
     phone: 'Phone Awareness',
     simulator: 'Simulation',
     audit: 'Activity',
     memory: 'Memory',
-    tools: 'Tools / Plugins',
+    customize: 'Customize',
+    marketplace: 'Marketplace',
     system: 'System Status',
     settings: 'Settings',
   };
@@ -2572,6 +2617,44 @@ function selectSection(sectionName, navKey = sectionName) {
     }
   }
   syncSidebarToggle();
+}
+
+function navigateCustomizeCategory(button, { historyMode = 'push', focus = true } = {}) {
+  const category = button?.dataset.customizeCategory;
+  const panel = dom.customizePanels.find((item) => item.dataset.customizePanel === category);
+  if (!category || !CUSTOMIZE_CATEGORY_IDS.has(category) || !panel) return false;
+
+  if (document.body.dataset.activeSection !== 'customize') selectSection('customize');
+  dom.customizeCategoryButtons.forEach((categoryButton) => {
+    const active = categoryButton === button;
+    categoryButton.classList.toggle('active', active);
+    categoryButton.setAttribute('aria-current', active ? 'location' : 'false');
+  });
+
+  if (historyMode === 'push') {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('settings');
+    url.searchParams.set('section', 'customize');
+    url.hash = panel.id;
+    if (url.href !== window.location.href) {
+      window.history.pushState({
+        ...(window.history.state || {}),
+        parmarSection: 'customize',
+        parmarSettingsRoute: false,
+        parmarCustomizeCategory: category,
+      }, '', url);
+    }
+  }
+
+  panel.scrollIntoView({ block: 'start', behavior: motionIsReduced() ? 'auto' : 'smooth' });
+  if (focus) {
+    const heading = panel.querySelector('h2');
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    }
+  }
+  return true;
 }
 
 function navigateWorkspaceAction(button) {
@@ -2588,9 +2671,25 @@ function navigateWorkspaceAction(button) {
     dom.chatInput?.focus();
     return;
   }
+  if (button.dataset.customizeCategory) {
+    const categoryButton = dom.customizeCategoryButtons.find(
+      (item) => item.dataset.customizeCategory === button.dataset.customizeCategory,
+    );
+    if (categoryButton) navigateCustomizeCategory(categoryButton);
+    return;
+  }
   if (!button.dataset.section) return;
-  if (button.dataset.section === 'settings') openSettingsHome();
-  else selectSection(button.dataset.section, button.dataset.navKey || button.dataset.section);
+  if (button.dataset.section === 'settings') {
+    openSettingsHome();
+    if (button.dataset.settingsCategory) {
+      const categoryButton = dom.settingsCategoryButtons.find(
+        (item) => item.dataset.settingsCategory === button.dataset.settingsCategory,
+      );
+      if (categoryButton) navigateSettingsCategory(categoryButton);
+    }
+    return;
+  }
+  selectSection(button.dataset.section, button.dataset.navKey || button.dataset.section);
   if (button.dataset.section === 'voki') dom.vokiInput?.focus({ preventScroll: true });
   if (button.dataset.homeFocus === 'request') dom.requestInput?.focus();
   if (button.dataset.homeFocus === 'approval') {
@@ -2713,18 +2812,20 @@ function restoreSettingsRoute(event) {
       }
       showSettingsHome({ focus: Boolean(event), restoreScroll: true });
     } else {
+      const settingsCategory = SETTINGS_CATEGORY_ALIASES.get(settingsRoute) || settingsRoute;
       const button = dom.settingsCategoryButtons.find(
-        (categoryButton) => categoryButton.dataset.settingsCategory === settingsRoute,
+        (categoryButton) => categoryButton.dataset.settingsCategory === settingsCategory,
       );
       if (button) {
         navigateSettingsCategory(button, { historyMode: 'none', focus: Boolean(event) });
-        if (!event?.state?.parmarSettingsFromHome) {
+        if (settingsRoute !== settingsCategory) url.searchParams.set('settings', settingsCategory);
+        if (!event?.state?.parmarSettingsFromHome || settingsRoute !== settingsCategory) {
           window.history.replaceState({
             ...(event?.state || window.history.state || {}),
             parmarSection: 'settings',
             parmarSettingsRoute: true,
             parmarSettingsFromHome: false,
-            settingsCategory: settingsRoute,
+            settingsCategory,
           }, '', url);
         }
       } else {
@@ -2736,7 +2837,24 @@ function restoreSettingsRoute(event) {
   }
 
   const routeSection = url.searchParams.get('section') || event?.state?.parmarSection;
-  if (routeSection && WORKSPACE_SECTION_IDS.has(routeSection)) selectSection(routeSection);
+  const legacySection = { tools: 'customize', integrations: 'customize' }[routeSection] || routeSection;
+  if (legacySection && WORKSPACE_SECTION_IDS.has(legacySection)) {
+    selectSection(legacySection);
+    if (legacySection === 'customize') {
+      const requestedCategory = dom.customizePanels.find((panel) => panel.id === url.hash.slice(1))?.dataset.customizePanel
+        || {
+          'customize-tools-plugins': 'tools-capabilities',
+          'customize-permissions': 'permissions-approvals',
+        }[url.hash.slice(1)]
+        || event?.state?.parmarCustomizeCategory
+        || { tools: 'tools-capabilities', integrations: 'integrations' }[routeSection];
+      const categoryButton = dom.customizeCategoryButtons.find(
+        (button) => button.dataset.customizeCategory
+          === (CUSTOMIZE_CATEGORY_ALIASES.get(requestedCategory) || requestedCategory),
+      );
+      if (categoryButton) navigateCustomizeCategory(categoryButton, { historyMode: 'none', focus: Boolean(event) });
+    }
+  }
 }
 
 function handleSettingsCategoryKeydown(event, button) {
@@ -2782,11 +2900,11 @@ function settingsSearchEntries(query) {
     let targetId = panel.querySelector('input:not([type="hidden"]), select, textarea')?.id || '';
     if (panel.dataset.settingsPanel === 'appearance') targetId = 'settings-theme';
     if (panel.dataset.settingsPanel === 'language') targetId = 'settings-language';
-    if (group === 'account' && (normalizedQuery.includes('logout') || normalizedQuery.includes('sign out'))) {
+    if (panel.dataset.settingsPanel === 'account' && (normalizedQuery.includes('logout') || normalizedQuery.includes('sign out'))) {
       targetId = 'settings-logout-btn';
     }
-    if (group === 'memory' && normalizedQuery.includes('memory')) targetId = 'settings-open-memory';
-    if (group === 'voice' && ['microphone', 'voice', 'speech'].some((term) => normalizedQuery.includes(term))) {
+    if (panel.dataset.settingsPanel === 'memory' && normalizedQuery.includes('memory')) targetId = 'settings-open-memory';
+    if (panel.dataset.settingsPanel === 'voice' && ['microphone', 'voice', 'speech'].some((term) => normalizedQuery.includes(term))) {
       targetId = 'settings-open-voki-voice';
     }
     if (panel.dataset.settingsPanel === 'workspace' && normalizedQuery.includes('search')) {
@@ -2861,6 +2979,120 @@ function renderSettingsSearch(query) {
   if (dom.settingsSearchStatus) {
     dom.settingsSearchStatus.textContent = `${matches.length} Settings result${matches.length === 1 ? '' : 's'}.`;
   }
+}
+
+function customizeSearchEntries(query) {
+  return dom.customizePanels.map((panel) => {
+    const category = panel.dataset.customizePanel;
+    const categoryButton = dom.customizeCategoryButtons.find(
+      (button) => button.dataset.customizeCategory === category,
+    );
+    const heading = panel.querySelector('h2');
+    const description = panel.querySelector('.settings-panel-heading p');
+    return {
+      category,
+      categoryLabel: categoryButton?.textContent.trim() || category,
+      heading: heading?.textContent.trim() || '',
+      description: description?.textContent.trim() || '',
+      searchableText: [
+        categoryButton?.textContent,
+        heading?.textContent,
+        panel.dataset.customizeSearchTerms,
+      ].join(' '),
+    };
+  }).filter((entry) => settingsSearchMatches(query, entry.searchableText));
+}
+
+function renderCustomizeSearch(query) {
+  const resultsElement = dom.customizeSearchResults;
+  if (!resultsElement || !dom.customizeSearch) return;
+  const normalizedQuery = query.trim();
+  resultsElement.replaceChildren();
+  if (!normalizedQuery) {
+    resultsElement.hidden = true;
+    dom.customizeSearch.setAttribute('aria-expanded', 'false');
+    if (dom.customizeSearchStatus) dom.customizeSearchStatus.textContent = '';
+    return;
+  }
+
+  const matches = customizeSearchEntries(normalizedQuery);
+  resultsElement.hidden = false;
+  dom.customizeSearch.setAttribute('aria-expanded', 'true');
+  if (!matches.length) {
+    const emptyState = document.createElement('p');
+    emptyState.className = 'settings-search-empty';
+    emptyState.textContent = 'No matching Customize sections were found.';
+    resultsElement.append(emptyState);
+    if (dom.customizeSearchStatus) dom.customizeSearchStatus.textContent = emptyState.textContent;
+    return;
+  }
+
+  matches.forEach((entry) => {
+    const result = document.createElement('button');
+    result.type = 'button';
+    result.className = 'settings-search-result';
+    result.dataset.customizeSearchResult = '';
+    result.dataset.customizeCategory = entry.category;
+    const title = document.createElement('strong');
+    title.textContent = entry.heading && entry.heading !== entry.categoryLabel
+      ? `${entry.categoryLabel} / ${entry.heading}`
+      : entry.categoryLabel;
+    const detail = document.createElement('span');
+    detail.textContent = entry.description;
+    result.append(title, detail);
+    resultsElement.append(result);
+  });
+  if (dom.customizeSearchStatus) {
+    dom.customizeSearchStatus.textContent = `${matches.length} Customize result${matches.length === 1 ? '' : 's'}.`;
+  }
+}
+
+function focusCustomizeSearchTarget(result) {
+  const categoryButton = dom.customizeCategoryButtons.find(
+    (button) => button.dataset.customizeCategory === result.dataset.customizeCategory,
+  );
+  if (!categoryButton || !navigateCustomizeCategory(categoryButton, { focus: false })) return;
+  const panel = dom.customizePanels.find(
+    (item) => item.dataset.customizePanel === result.dataset.customizeCategory,
+  );
+  const heading = panel?.querySelector('h2');
+  if (heading) {
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+  }
+}
+
+function handleCustomizeSearchKeydown(event) {
+  if (event.key === 'ArrowDown' && !dom.customizeSearchResults?.hidden) {
+    const firstResult = dom.customizeSearchResults.querySelector('[data-customize-search-result]');
+    if (firstResult) {
+      event.preventDefault();
+      firstResult.focus();
+    }
+  } else if (event.key === 'Escape' && !dom.customizeSearchResults?.hidden) {
+    dom.customizeSearchResults.hidden = true;
+    dom.customizeSearch?.setAttribute('aria-expanded', 'false');
+    if (dom.customizeSearchStatus) dom.customizeSearchStatus.textContent = 'Customize search results closed.';
+  }
+}
+
+function handleCustomizeCategoryKeydown(event, button) {
+  const currentIndex = dom.customizeCategoryButtons.indexOf(button);
+  if (currentIndex < 0) return;
+  let nextIndex;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    nextIndex = (currentIndex + 1) % dom.customizeCategoryButtons.length;
+  } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+    nextIndex = (currentIndex - 1 + dom.customizeCategoryButtons.length) % dom.customizeCategoryButtons.length;
+  } else if (event.key === 'Home') {
+    nextIndex = 0;
+  } else if (event.key === 'End') {
+    nextIndex = dom.customizeCategoryButtons.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  dom.customizeCategoryButtons[nextIndex].focus();
 }
 
 function focusSettingsSearchTarget(result) {
@@ -4908,6 +5140,10 @@ async function submitChatMessage() {
     const failureMessage = researchRequested
       ? 'The research request could not be completed. No usable PARMAR research result was available.'
       : 'The chat service could not respond. Please try again.';
+    if (dom.chatInput && !dom.chatInput.value.trim()) {
+      dom.chatInput.value = text;
+      resizeChatInput();
+    }
     if (state.currentSessionId === sessionId) {
       showRequestUnavailable(researchRequested
         ? 'The research request could not be completed. No usable PARMAR research result was available.'
@@ -5162,6 +5398,10 @@ function bindEvents() {
     button.addEventListener('click', () => navigateSettingsCategory(button));
     button.addEventListener('keydown', (event) => handleSettingsCategoryKeydown(event, button));
   });
+  dom.customizeCategoryButtons.forEach((button) => {
+    button.addEventListener('click', () => navigateCustomizeCategory(button));
+    button.addEventListener('keydown', (event) => handleCustomizeCategoryKeydown(event, button));
+  });
   dom.settingsBackButton?.addEventListener('click', () => {
     if (window.history.state?.parmarSettingsFromHome) {
       window.history.back();
@@ -5173,6 +5413,8 @@ function bindEvents() {
   window.addEventListener('popstate', restoreSettingsRoute);
   dom.settingsSearch?.addEventListener('input', () => renderSettingsSearch(dom.settingsSearch.value));
   dom.settingsSearch?.addEventListener('keydown', handleSettingsSearchKeydown);
+  dom.customizeSearch?.addEventListener('input', () => renderCustomizeSearch(dom.customizeSearch.value));
+  dom.customizeSearch?.addEventListener('keydown', handleCustomizeSearchKeydown);
   dom.settingsProviderRefresh?.addEventListener('click', () => { void loadProviderReadiness(); });
   dom.memorySearch?.addEventListener('input', () => {
     state.memoryQuery = dom.memorySearch.value;
@@ -5183,6 +5425,10 @@ function bindEvents() {
     if (result) focusSettingsSearchTarget(result);
   });
   dom.settingsSearchResults?.addEventListener('keydown', handleSettingsSearchResultsKeydown);
+  dom.customizeSearchResults?.addEventListener('click', (event) => {
+    const result = event.target.closest('[data-customize-search-result]');
+    if (result) focusCustomizeSearchTarget(result);
+  });
   dom.parmarCore?.addEventListener('click', () => {
     selectSection('voki');
     dom.vokiInput?.focus({ preventScroll: true });

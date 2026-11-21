@@ -54,6 +54,69 @@ test('panel release uses displacement and directional velocity without accidenta
   assert.equal(context.shouldOpenPanelAfterGesture(0.2, 0.8, 12), false);
 });
 
+test('a completed right-edge gesture reaches AETHER through the existing desktop control', () => {
+  const calls = [];
+  const panel = {
+    style: { removeProperty() {} },
+    getBoundingClientRect: () => ({ width: 100 }),
+  };
+  const testContext = vm.createContext({
+    PANEL_TRANSITION_MS: 240,
+    panelGesture: {
+      side: 'right',
+      wasOpen: false,
+      pointerId: 1,
+      startX: 400,
+      startY: 20,
+      lastX: 320,
+      lastY: 20,
+      startedAt: 0,
+      locked: true,
+    },
+    gestureResetTimer: null,
+    panelFocusOrigins: { left: null, right: null },
+    dom: {
+      discoveryPanel: panel,
+      panelScrim: { hidden: false, style: { removeProperty() {} } },
+      aetherDesktopOpen: { hidden: false, disabled: false, click: () => calls.push('open-aether') },
+    },
+    document: {
+      activeElement: null,
+      body: { dataset: { gestureState: 'tracking-right' }, classList: { add() {}, remove() {} } },
+    },
+    window: { innerWidth: 400, clearTimeout() {}, setTimeout: () => 1 },
+    performance: { now: () => 100 },
+    panelElement: () => panel,
+    panelOpenFraction: (_side, _wasOpen, deltaX, width) => Math.max(0, Math.min(1, -deltaX / width)),
+    shouldOpenPanelAfterGesture: (progress) => progress >= 0.48,
+    panelGestureAxis: () => 'horizontal',
+    selectSection: (section) => calls.push(section),
+    openWorkspacePanel() { assert.fail('The right-edge gesture must not open Discovery instead of AETHER.'); },
+    closeWorkspacePanel() {},
+  });
+  vm.runInContext(`${functionSource('finishPanelGesture')}\nglobalThis.finishPanelGesture = finishPanelGesture;`, testContext);
+
+  testContext.finishPanelGesture(null, false);
+  assert.deepEqual(calls, ['aether', 'open-aether']);
+  assert.equal(testContext.dom.panelScrim.hidden, true);
+
+  calls.length = 0;
+  testContext.dom.aetherDesktopOpen.hidden = true;
+  testContext.panelGesture = {
+    side: 'right',
+    wasOpen: false,
+    pointerId: 2,
+    startX: 400,
+    startY: 20,
+    lastX: 320,
+    lastY: 20,
+    startedAt: 0,
+    locked: true,
+  };
+  testContext.finishPanelGesture(null, false);
+  assert.deepEqual(calls, ['aether']);
+});
+
 test('closed desktop discovery is inert and its open state remains accessible', () => {
   class Panel {
     constructor() {
