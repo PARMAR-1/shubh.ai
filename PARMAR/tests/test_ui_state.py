@@ -287,7 +287,7 @@ def test_voki_and_chat_share_server_selected_conversation_without_history_replay
     assert 'data-voki-home-avatar' in html_source
     assert 'data-voki-default-image src="/static/assets/voki/Vokki.png"' in html_source
     assert 'data-section="voki"' in html_source
-    assert 'aria-label="VOKKI interface"' in html_source
+    assert 'aria-label="VOKKI"' in html_source
     assert "button.dataset.section === 'voki'" in app_source
     assert "dom.vokiInput?.focus({ preventScroll: true })" in app_source
     assert "ACTIVE_CONVERSATION_KEY = 'parmar-active-conversation-v1'" in app_source
@@ -308,7 +308,7 @@ def test_authenticated_logout_control_is_hidden_until_server_confirms_session():
     app_source = (Path(__file__).parents[1] / "interface" / "static" / "app.js").read_text(encoding="utf-8")
     render_auth = re.search(r"function renderAuthenticationControls\(\) \{(.*?)\n\}", app_source, re.DOTALL)
     assert 'id="logout-btn"' in html_source
-    assert 'id="logout-btn" type="button" hidden' in html_source
+    assert re.search(r'<button[^>]*id="logout-btn"[^>]*type="button"[^>]*hidden', html_source)
     assert render_auth is not None
     assert "dom.logoutBtn.hidden = !authenticated" in render_auth.group(1)
     assert "renderAuthenticationControls();" in app_source
@@ -373,10 +373,10 @@ def test_workspace_toolbar_routes_real_research_through_chat_without_a_fake_work
     for control_id in ("sidebar", "sidebar-close", "sidebar-toggle", "discovery-panel", "discovery-toggle", "discovery-close", "panel-scrim"):
         assert f'id="{control_id}"' in html_source
     assert 'role="toolbar" aria-label="PARMAR capabilities"' in html_source
-    assert 'data-action="new-chat" aria-label="New Chat" title="New Chat"' in html_source
+    assert 'id="new-session-btn" type="button" aria-label="New Chat" title="New Chat"' in html_source
     assert '<svg viewBox="0 0 24 24" aria-hidden="true">' in html_source
     assert 'data-section="memory"' in html_source
-    assert 'data-section="tools"' in html_source
+    assert 'data-customize-category="tools-capabilities"' in html_source
     assert 'data-section="voki" title="Open the dedicated VOKKI interface"' in html_source
     assert '<span>Plugins</span><span class="capability-unavailable">Not connected</span>' in html_source
     assert '<span>Tools</span><span class="capability-unavailable">Not connected</span>' in html_source
@@ -606,7 +606,7 @@ def test_home_navigation_controls_do_not_submit_or_claim_a_ready_state():
     assert 'data-section="home" data-nav-key="home"' in html_source
     assert ".sidebar-brand[data-section]" in events.group(1)
     assert 'data-section="voki"' in html_source
-    assert 'aria-label="VOKKI interface"' in html_source
+    assert 'aria-label="VOKKI"' in html_source
     home_section = re.search(r'<section class="section-view active home-command-center"[\s\S]*?(?=<section class="section-view core-workspace")', html_source)
     assert home_section is not None
     assert "NOT YET ASSESSED" in home_section.group(0)

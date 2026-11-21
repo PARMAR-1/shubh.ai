@@ -8,6 +8,7 @@ const staticDir = path.join(__dirname, '..', 'interface', 'static');
 const html = fs.readFileSync(path.join(staticDir, 'index.html'), 'utf8');
 const appSource = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 const styles = fs.readFileSync(path.join(staticDir, 'styles.css'), 'utf8');
+const premiumStyles = fs.readFileSync(path.join(staticDir, 'premium.css'), 'utf8');
 
 function functionSource(name) {
   const match = appSource.match(new RegExp(`function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`));
@@ -47,7 +48,7 @@ test('Home matches the reference-led dashboard while Core and VOKKI remain separ
   assert.match(home, /data-voki-default-image src="\/static\/assets\/voki\/Vokki\.png"/);
   assert.doesNotMatch(home, /data-voki-interface|parmar-core/);
 
-  assert.match(html, /data-section="core" data-nav-key="core" aria-label="PARMAR Core"/);
+  assert.match(html, /data-section="core" data-nav-key="core" aria-label="Decision review"/);
   assert.match(html, /id="section-core" aria-labelledby="core-title"/);
   assert.match(html, /id="section-voki" aria-labelledby="voki-interface-title"/);
   assert.match(html, /data-voki-default-image src="\/static\/assets\/voki\/Vokki\.png"/);
@@ -75,20 +76,20 @@ test('Home search and composer use loaded data and the existing PARMAR chat flow
   assert.match(functionSource('bindEvents'), /dom\.homeChatComposer\?\.addEventListener\('submit', sendHomeChatMessage\)/);
 });
 
-test('The original equals-bar control retains its two-line styling and sidebar toggle behavior', () => {
+test('The classic glass hamburger meets its size and line contract and toggles navigation', () => {
   const toggle = html.match(/<button class="sidebar-toggle"[^>]*>([\s\S]*?)<\/button>/);
   assert.ok(toggle, 'Expected the original sidebar toggle in the top navigation.');
-  assert.match(toggle[1], /<span><\/span><span><\/span>/);
+  assert.equal((toggle[1].match(/<span><\/span>/g) || []).length, 2);
+  assert.match(toggle[0], /aria-expanded="false" aria-controls="sidebar"/);
+  assert.match(premiumStyles, /\.sidebar-toggle\s*\{[^}]*width:\s*35px;[^}]*height:\s*35px;[^}]*border-radius:\s*5px;/);
+  assert.match(premiumStyles, /\.sidebar-toggle span\s*\{[^}]*width:\s*14px;[^}]*background:\s*#d3c9b9;/);
+  assert.match(premiumStyles, /\.sidebar-toggle:hover\s*\{[^}]*border-color:\s*rgba\(200, 157, 105, 0\.4\);[^}]*background:\s*#1b1916;/);
+  assert.doesNotMatch(premiumStyles, /\.sidebar-toggle\[aria-expanded="true"\]\s+span/);
   assert.match(
-    styles,
-    /\.sidebar-toggle\s*\{\s*display:\s*inline-flex;\s*flex-direction:\s*column;\s*gap:\s*4px;/,
+    premiumStyles,
+    /@media \(max-width: 640px\)[\s\S]*?\.sidebar-toggle \{\s*width: 34px;\s*height: 34px;/,
   );
-  assert.match(styles, /\.sidebar-toggle span\s*\{\s*width:\s*15px;\s*height:\s*1px;/);
   assert.doesNotMatch(styles, /\.topbar-left \.sidebar-toggle[^{}]*\{[^}]*display:\s*none/);
-  assert.match(
-    styles,
-    /@media \(max-width: 640px\)[\s\S]*?\.sidebar-toggle \{ width: 38px; min-height: 38px; \}/,
-  );
   assert.match(
     functionSource('bindEvents'),
     /dom\.sidebarToggle\.addEventListener\('click', \(\) => toggleWorkspacePanel\('left', dom\.sidebarToggle\)\)/,
@@ -96,30 +97,29 @@ test('The original equals-bar control retains its two-line styling and sidebar t
   assert.match(functionSource('toggleWorkspacePanel'), /workspacePanels\[side\]/);
 });
 
-test('The expanded sidebar retains every original labeled navigation option and icon', () => {
+test('Primary navigation and accessible secondary workspaces retain their labels and icons', () => {
   const sidebar = html.match(/<aside class="sidebar" id="sidebar"[\s\S]*?<\/aside>/)?.[0];
   assert.ok(sidebar, 'Expected the original sidebar navigation.');
   const options = [
-    ['New Chat', 'chat'],
     ['Home', 'home'],
-    ['Chats / History', 'chat'],
-    ['Research', 'research'],
+    ['Chats', 'chat'],
     ['VOKKI', 'voki'],
     ['AETHER', 'aether'],
-    ['PARMAR Core', 'core'],
+    ['Marketplace', 'marketplace'],
+    ['Learning Workspace', 'learning'],
+    ['Research', 'research'],
+    ['Decision review', 'core'],
     ['Risk &amp; Safety', 'safety'],
     ['Simulation', 'simulator'],
     ['Memory', 'memory'],
     ['Approvals', 'approvals'],
-    ['Tools / Plugins', 'tools'],
     ['Knowledge', 'knowledge'],
-    ['Learning', 'learning'],
     ['Workflow', 'workflow'],
     ['Agent Studio', 'agents'],
-    ['Integrations', 'integrations'],
     ['Analytics', 'analytics'],
     ['System Status', 'system'],
     ['Settings', 'settings'],
+    ['Customize', 'customize'],
     ['Phone Awareness', 'phone'],
     ['Activity', 'audit'],
   ];
@@ -135,6 +135,9 @@ test('The expanded sidebar retains every original labeled navigation option and 
     assert.match(content, /class="nav-mark nav-icon" aria-hidden="true"><svg/, `Missing icon for ${label}`);
   }
 
+  assert.match(html, /id="new-session-btn"[^>]*aria-label="New Chat"[^>]*title="New Chat"/);
+  assert.match(html, /data-customize-category="integrations"/);
+  assert.doesNotMatch(sidebar, /data-section="integrations"/);
   assert.match(styles, /body\.sidebar-collapsed \.nav-item > span:not\(\.nav-mark\)/);
   const redesignStyles = styles.slice(styles.indexOf('/* Reference-led PARMAR Home command center */'));
   assert.doesNotMatch(redesignStyles, /\.(?:nav-label|sidebar-section-label|nav-item > span:not\(\.nav-mark\))[^{}]*\{\s*display:\s*none/);

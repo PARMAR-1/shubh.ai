@@ -191,7 +191,7 @@ test('startup restores conversation history without leaving Home, while normal s
   assert.match(appSource, /void selectServerConversation\(selected\.id\)/);
 });
 
-test('Home and PARMAR Core are separate visible destinations', () => {
+test('Home and decision review remain separate destinations', () => {
   const html = fs.readFileSync(
     path.join(__dirname, '..', 'interface', 'static', 'index.html'),
     'utf8',
@@ -200,7 +200,7 @@ test('Home and PARMAR Core are separate visible destinations', () => {
   assert.ok(homeNav);
   assert.match(homeNav[0], /aria-label="Home"/);
   assert.match(homeNav[1], /<span>Home<\/span>/);
-  assert.match(html, /data-section="core" data-nav-key="core" aria-label="PARMAR Core"/);
+  assert.match(html, /data-section="core" data-nav-key="core" aria-label="Decision review"/);
   assert.match(html, /id="section-core" aria-labelledby="core-title"/);
 
   const bindEvents = functionSource('bindEvents');

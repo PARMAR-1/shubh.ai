@@ -13,7 +13,6 @@ test('local ecosystem foundations use real saved-state workflows', () => {
     ['learning', 'Learning & JEE'],
     ['workflow', 'Visual Workflow Builder'],
     ['agents', 'Agent Studio'],
-    ['integrations', 'API & Integrations'],
   ]) {
     assert.match(html, new RegExp(`data-section="${section}"`));
     assert.match(html, new RegExp(`id="section-${section}"`));
@@ -25,6 +24,8 @@ test('local ecosystem foundations use real saved-state workflows', () => {
   assert.match(app, /STORAGE_KEYS\.agents/);
   assert.match(app, /STORAGE_KEYS\.integrations/);
   assert.match(app, /STORAGE_KEYS\.marketplace/);
+  assert.match(html, /data-customize-category="integrations"/);
+  assert.doesNotMatch(html, /data-section="integrations"|id="section-integrations"/);
 });
 
 test('workflow drafts validate node connections before saving', () => {

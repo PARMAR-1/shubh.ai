@@ -25,6 +25,7 @@ for (const viewport of viewports) {
     if (viewport.width <= 920) {
       await page.locator('#sidebar-toggle').click();
     }
+    await page.locator('#sidebar-workspaces > summary').click();
     await page.locator('#sidebar [data-section="knowledge"]').click();
     await expect(page.locator('#section-knowledge')).toHaveClass(/active/);
     await expect(page.getByRole('heading', { name: 'Knowledge Hub' })).toBeVisible();

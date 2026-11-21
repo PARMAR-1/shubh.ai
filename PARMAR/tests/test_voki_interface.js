@@ -619,7 +619,7 @@ test('Home keeps the canonical VOKKI portrait and preserves optional local-refer
     portraitRules.map(([, , declarations]) => declarations).join('\n'),
     /\b(?:filter|transform|animation|opacity)\s*:/,
   );
-  assert.match(html, /<button class="nav-item" data-section="voki" aria-label="VOKKI interface"/);
+  assert.match(html, /<button class="nav-item" data-section="voki" data-primary-navigation="voki" aria-label="VOKKI"/);
   assert.match(app, /state\.homeVokiAvatar = new window\.PARMARVOKKIAvatar\.VOKKIAvatarPresentation/);
   assert.doesNotMatch(app, /classList\.add\('acknowledged'\)/);
 });
@@ -652,7 +652,7 @@ test('Home workspace launches use section navigation and AETHER reports its unav
   assert.match(app, /\.home-action\[data-section\], \.home-action\[data-action\]/);
   assert.match(html, /data-action="new-chat"/);
   assert.match(html, /data-action="research-chat"/);
-  assert.match(html, /data-section="core" data-nav-key="core" aria-label="PARMAR Core" title="PARMAR Core" data-home-focus="request"/);
+  assert.match(html, /data-section="core" data-nav-key="core" aria-label="Decision review" title="Decision review" data-home-focus="request"/);
   assert.match(html, /data-section="approvals" data-nav-key="approvals" data-home-focus="approval"/);
   assert.match(html, /data-section="simulator"/);
   assert.match(html, /data-section="safety"/);
