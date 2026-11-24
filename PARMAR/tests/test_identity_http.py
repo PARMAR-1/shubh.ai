@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -15,7 +16,7 @@ from PARMAR.identity_contracts import (
     VerifiedProviderIdentity,
 )
 from PARMAR.tests.identity_test_support import trusted_session
-from PARMAR.identity_store import SQLiteIdentityRepository
+from PARMAR.identity_store import SQLiteIdentityRepository, TrustedInternalAccountProvisioner
 from PARMAR.interface import futuristic_app
 from PARMAR.sessions import (
     InMemorySessionRepository,
@@ -30,6 +31,7 @@ def identity_api(monkeypatch, tmp_path):
     manager = SessionManager(
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=300, absolute_timeout_seconds=900),
+        account_status_lookup=lambda _identity: True,
     )
     repository = SQLiteIdentityRepository(tmp_path / "identity.sqlite3")
     monkeypatch.setattr(futuristic_app, "SESSION_MANAGER", manager)
@@ -336,6 +338,38 @@ def test_trusted_identity_session_binds_http_principal_and_profile_owner(identit
     assert futuristic_app._resolve_request_context(request)
     assert request.request_context.authenticated_principal.account_identity == first_account
     assert request.request_context.principal.user_id == first_account.value
+
+
+def test_disabled_account_is_denied_by_http_routes_and_reactivation_does_not_restore_session(
+    identity_api,
+):
+    manager, repository = identity_api
+    account = TrustedInternalAccountProvisioner(repository).provision_account()
+    session = trusted_session(manager, account.account_identity)
+    manager.set_account_status_lookup(repository.is_account_active)
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "UPDATE accounts SET status = 'DISABLED' WHERE account_id = ?",
+            (account.account_identity.serialize(),),
+        )
+
+    response, errors = request_for(
+        manager,
+        "/api/identity/profiles",
+        method="GET",
+        session=session,
+    )
+    assert response == {}
+    assert errors == [(401, "An authenticated session is required")]
+    persisted = manager.repository.get_by_session_id(session.session.session_id)
+    assert persisted is not None and persisted.status == "REVOKED"
+
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "UPDATE accounts SET status = 'ACTIVE' WHERE account_id = ?",
+            (account.account_identity.serialize(),),
+        )
+    assert manager.resolve(session.session_token) is None
 
 
 def test_authenticated_session_can_switch_owned_profiles_and_rejects_foreign_profile(identity_api):

@@ -1,0 +1,78 @@
+name: PARMAR Keycloak OIDC E2E infrastructure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keycloak-oidc-infrastructure:
+    name: Isolated Keycloak OIDC infrastructure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      PARMAR_E2E_RUN_ID: ${{ github.run_id }}
+      PARMAR_E2E_RUN_ATTEMPT: ${{ github.run_attempt }}
+      # User-approved immutable linux/amd64 child digest; no signature claim is made.
+      PARMAR_KEYCLOAK_IMAGE: "quay.io/keycloak/keycloak@sha256:75b5c435a83b530caba5923922f93d47b2e3f8b4ad9e79200581122996653e55"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate GitHub Actions workflow syntax
+        timeout-minutes: 3
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/parmar-keycloak-oidc-e2e.yml
+
+      - name: Install pinned PARMAR test dependencies in a run-local virtual environment
+        timeout-minutes: 8
+        run: |
+          python3 -m venv "$RUNNER_TEMP/parmar-oidc-e2e-venv"
+          "$RUNNER_TEMP/parmar-oidc-e2e-venv/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --requirement PARMAR/requirements.txt
+          printf '%s\n' "$RUNNER_TEMP/parmar-oidc-e2e-venv/bin" >>"$GITHUB_PATH"
+
+      - name: Verify runner capabilities and prepare isolated run directory
+        timeout-minutes: 5
+        run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh preflight
+
+      - name: Generate ephemeral loopback TLS certificates
+        timeout-minutes: 3
+        run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh prepare-tls
+
+      - name: Prepare disposable realm credentials and isolated databases
+        timeout-minutes: 3
+        run: python3 -m PARMAR.tests.keycloak_e2e_bootstrap prepare
+
+      - name: Pull reviewed immutable Keycloak image
+        timeout-minutes: 10
+        run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh pull-image
+
+      - name: Start Keycloak on loopback only
+        timeout-minutes: 5
+        run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh start-keycloak
+
+      - name: Wait for bounded Keycloak readiness
+        timeout-minutes: 4
+        run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh wait-keycloak
+
+      - name: Create disposable realm, client, and bound/unbound test identities
+        timeout-minutes: 5
+        run: python3 -m PARMAR.tests.keycloak_e2e_bootstrap bootstrap
+
+      - name: Run real authorization-code, PKCE, callback, and session E2E tests
+        timeout-minutes: 15
+        env:
+          PARMAR_LIVE_KEYCLOAK_E2E: "1"
+        run: |
+          [[ "$PARMAR_LIVE_KEYCLOAK_E2E" == "1" ]] || {
+            printf '::error::Live Keycloak E2E tests must not be skipped.\n' >&2
+            exit 1
+          }
+          python3 -m pytest PARMAR/tests/test_keycloak_oidc_live_e2e.py -q -ra --tb=short
+
+      - name: Remove resources owned by this run
+        if: always()
+        timeout-minutes: 3
+        run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh cleanup

@@ -26,7 +26,11 @@ from PARMAR.identity_contracts import (
     ProviderIdentity,
     VerifiedProviderIdentity,
 )
-from PARMAR.identity_store import IdentityStorageUnavailable, SQLiteIdentityRepository
+from PARMAR.identity_store import (
+    IdentityStorageUnavailable,
+    SQLiteIdentityRepository,
+    TrustedInternalAccountProvisioner,
+)
 from PARMAR.interface import futuristic_app
 from PARMAR.interface.approvals import (
     ApprovalStorageUnavailable,
@@ -127,6 +131,52 @@ def create_pending_review(request="Purchase a $500 software license"):
     assert response["result"]["status"] == "APPROVAL_REQUIRED"
     assert response["result"].get("approval_id"), response["result"]
     return response["result"]
+
+
+def test_disabled_account_cannot_execute_pending_approval_or_restore_old_session():
+    global _TEST_SESSION
+    account = TrustedInternalAccountProvisioner(_TEST_IDENTITY_REPOSITORY).provision_account()
+    credentials = trusted_session(_TEST_SESSION_MANAGER, account.account_identity)
+    _TEST_SESSION_MANAGER.set_account_status_lookup(
+        _TEST_IDENTITY_REPOSITORY.is_account_active,
+    )
+    profile = _TEST_IDENTITY_REPOSITORY.create_profile(
+        account.account_identity.value,
+        "Revocation test",
+    )
+    selected = _TEST_SESSION_MANAGER.select_profile(
+        credentials.session.session_id,
+        credentials.session.user_id,
+        profile.profile_id,
+    )
+    assert selected is not None
+    _TEST_SESSION = replace(credentials, session=selected)
+    pending = create_pending_review()
+
+    with sqlite3.connect(_TEST_IDENTITY_REPOSITORY.database_path) as connection:
+        connection.execute(
+            "UPDATE accounts SET status = 'DISABLED' WHERE account_id = ?",
+            (account.account_identity.serialize(),),
+        )
+
+    blocked = post(
+        "/api/approval",
+        {"approval_id": pending["approval_id"], "decision": "APPROVE"},
+    )
+    assert blocked["status"] == 403
+    assert _TEST_IDENTITY_REPOSITORY.get_account_status(account.account_identity).value == "DISABLED"
+    assert futuristic_app.PENDING_APPROVALS.inspect(
+        pending["approval_id"],
+        user_id=selected.user_id,
+        session_id=selected.session_id,
+    ) is not None
+
+    with sqlite3.connect(_TEST_IDENTITY_REPOSITORY.database_path) as connection:
+        connection.execute(
+            "UPDATE accounts SET status = 'ACTIVE' WHERE account_id = ?",
+            (account.account_identity.serialize(),),
+        )
+    assert _TEST_SESSION_MANAGER.resolve(_TEST_SESSION.session_token) is None
 
 
 def test_untrusted_sessions_cannot_create_actionable_analysis_approvals():
@@ -1072,6 +1122,7 @@ def test_approval_owner_and_actor_use_the_same_trusted_canonical_identity():
     manager = SessionManager(
         InMemorySessionRepository(),
         SessionPolicy(idle_timeout_seconds=600, absolute_timeout_seconds=1800),
+        account_status_lookup=lambda _identity: True,
     )
     resolver = ProviderBoundIdentityResolver(Adapter(), Bindings())
     owner_session = manager.create_identity_session(resolver, "first-proof")

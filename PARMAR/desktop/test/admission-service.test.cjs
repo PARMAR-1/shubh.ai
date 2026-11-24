@@ -18,6 +18,7 @@ const GENERATION_ID = '123e4567-e89b-42d3-a456-426614174000';
 const CURRENT_UID = typeof process.getuid === 'function' ? process.getuid() : null;
 const CURRENT_GID = typeof process.getgid === 'function' ? process.getgid() : null;
 const REQUEST_TIMEOUT_MS = 3000;
+const NATIVE_SERVICE_STARTUP_TIMEOUT_MS = 10000;
 const SETPRIV_PATH = ['/usr/bin/setpriv', '/bin/setpriv'].find((candidate) =>
   fs.existsSync(candidate));
 const CAN_SPAWN_AUTHORIZED_PEER = CURRENT_UID === 0 && SETPRIV_PATH !== undefined;
@@ -195,7 +196,7 @@ function queryServiceInfoAsAuthorizedPeer(uid, socketPath, timeoutMs) {
 }
 
 async function waitForSocket(service, socketPath) {
-  const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+  const deadline = Date.now() + NATIVE_SERVICE_STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (service.exitCode !== null) {
       throw new Error(`Native admission service exited during startup (${service.exitCode}).`);
@@ -424,7 +425,7 @@ test('native service rejects missing and conflicting identity mappings', async (
       child.stderr.on('data', (chunk) => { stderr += chunk; });
       const exitCode = await new Promise((resolve, reject) => {
         child.once('error', reject);
-        child.once('exit', resolve);
+        child.once('close', resolve);
       });
       assert.equal(exitCode, 2, stderr);
       assert.match(stderr, /configuration is invalid|identity does not match/);

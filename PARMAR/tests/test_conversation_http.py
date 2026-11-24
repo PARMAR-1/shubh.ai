@@ -402,7 +402,11 @@ def test_persistent_session_restart_restores_server_user_and_owned_conversation(
     )
     assert response == {}
     assert_authenticated_chat_no_go(errors)
-    restarted_manager = SessionManager(sqlite_session_repository(session_path), session_policy)
+    restarted_manager = SessionManager(
+        sqlite_session_repository(session_path),
+        session_policy,
+        account_status_lookup=lambda _identity: True,
+    )
     restarted_conversations = SQLiteConversationRepository(conversation_path)
     monkeypatch.setattr(futuristic_app, "SESSION_MANAGER", restarted_manager)
     monkeypatch.setattr(futuristic_app, "CONVERSATION_REPOSITORY", restarted_conversations)

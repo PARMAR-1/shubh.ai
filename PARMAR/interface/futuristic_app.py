@@ -59,6 +59,17 @@ from PARMAR.memories import (
     MemoryStorageUnavailable,
     SQLiteMemoryRepository,
 )
+from PARMAR.oidc import (
+    KeycloakOIDCAdapter,
+    OIDCAuthorizationError,
+    OIDC_CALLBACK_PATH,
+    OIDCCallbackEvidence,
+    OIDCIdentityResolver,
+    OIDCStateStore,
+    OIDCUnavailable,
+    oidc_configuration_from_environment,
+    oidc_state_store_from_environment,
+)
 from PARMAR.chat.readiness import (
     ProviderConfigurationRegistry,
     external_authorization_from_environment,
@@ -102,16 +113,36 @@ MAX_POST_BODY_BYTES = 1_048_576
 UI_PORT = 8080
 DEVELOPMENT_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000005")
 DEVELOPMENT_AUTH_SOURCE = "local-development-unverified"
+OIDC_TRANSACTION_COOKIE_NAME = "__Host-parmar_oidc_transaction"
 PENDING_APPROVALS = pending_approval_store_from_environment()
 PHONE_AWARENESS = PhoneAwarenessModule()
 EXTERNAL_AUTHORIZATION = external_authorization_from_environment()
 PRINCIPAL_RESOLVER: PrincipalResolver = LocalDemoPrincipalResolver()
 SESSION_MANAGER: SessionManager | None = session_manager_from_environment()
+try:
+    OIDC_CONFIGURATION = oidc_configuration_from_environment()
+except OIDCUnavailable:
+    OIDC_CONFIGURATION = None
+    OIDC_CONFIGURATION_ERROR = True
+else:
+    OIDC_CONFIGURATION_ERROR = False
+OIDC_ADAPTER = (
+    KeycloakOIDCAdapter(OIDC_CONFIGURATION)
+    if OIDC_CONFIGURATION is not None
+    else None
+)
+OIDC_STATE_STORE = (
+    oidc_state_store_from_environment(OIDC_CONFIGURATION)
+    if OIDC_CONFIGURATION is not None
+    else None
+)
 _PERSISTENT_CONVERSATIONS = SQLiteConversationRepository.from_environment()
 CONVERSATION_REPOSITORY: ConversationRepository = _PERSISTENT_CONVERSATIONS
 MESSAGE_REPOSITORY: MessageRepository = _PERSISTENT_CONVERSATIONS
 MEMORY_REPOSITORY: MemoryRepository = SQLiteMemoryRepository.from_environment()
 IDENTITY_REPOSITORY = SQLiteIdentityRepository.from_environment()
+if SESSION_MANAGER is not None:
+    SESSION_MANAGER.set_account_status_lookup(IDENTITY_REPOSITORY.is_account_active)
 
 
 class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
@@ -234,6 +265,11 @@ def _validate_startup_configuration(
     port = UI_PORT
     environment = settings.get("PARMAR_ENVIRONMENT", "").strip().casefold()
     development_auth = settings.get("PARMAR_DEVELOPMENT_AUTH_ENABLED", "false").strip().casefold()
+    try:
+        oidc_configuration = oidc_configuration_from_environment(settings)
+    except OIDCUnavailable:
+        raise ValueError("OIDC authentication configuration is unavailable.") from None
+    oidc_enabled = oidc_configuration is not None
 
     if environment not in {"", "development", "test", "production", "prod"}:
         raise ValueError(
@@ -257,7 +293,12 @@ def _validate_startup_configuration(
     tls_context = _load_server_tls_context(
         certfile,
         keyfile,
-        required=production or external_listener or development_auth_origin is not None,
+        required=(
+            production
+            or external_listener
+            or development_auth_origin is not None
+            or oidc_enabled
+        ),
     )
 
     ui_origin = _configured_ui_origin(
@@ -279,6 +320,32 @@ def _validate_startup_configuration(
         port,
         tls_enabled=tls_context is not None,
     )
+    if oidc_configuration is not None:
+        redirect = urlsplit(oidc_configuration.redirect_uri)
+        listener_origin = urlsplit(ui_origin or "")
+        try:
+            redirect_port = redirect.port or 443
+            listener_port = listener_origin.port or 443
+        except ValueError:
+            raise ValueError("OIDC redirect URI must match the configured HTTPS UI origin.") from None
+        if (
+            tls_context is None
+            or ui_origin is None
+            or listener_origin.scheme != "https"
+            or redirect.scheme != "https"
+            or redirect.hostname is None
+            or listener_origin.hostname is None
+            or redirect.hostname.casefold() != listener_origin.hostname.casefold()
+            or redirect_port != listener_port
+            or redirect.path != OIDC_CALLBACK_PATH
+            or redirect.query
+            or redirect.fragment
+            or redirect.username is not None
+            or redirect.password is not None
+        ):
+            raise ValueError(
+                "PARMAR_OIDC_REDIRECT_URI must match the configured HTTPS UI origin and callback path."
+            )
     if external_listener:
         raise ValueError(
             "Externally reachable listener startup is disabled until authentication, "
@@ -856,19 +923,80 @@ def _read_session_cookie(request: object) -> str | None:
     return morsel.value if morsel is not None else None
 
 
-def _resolve_request_context(request: object) -> bool:
+def _read_oidc_transaction_cookie(request: object) -> str | None:
+    headers = getattr(request, "headers", None)
+    get_header = getattr(headers, "get", None)
+    raw_cookie = get_header("Cookie", "") if callable(get_header) else ""
+    if not isinstance(raw_cookie, str) or not raw_cookie:
+        return None
+    parsed_cookie = SimpleCookie()
+    try:
+        parsed_cookie.load(raw_cookie)
+    except CookieError:
+        return None
+    morsel = parsed_cookie.get(OIDC_TRANSACTION_COOKIE_NAME)
+    return morsel.value if morsel is not None else None
+
+
+def oidc_transaction_cookie_header(token: str) -> str:
+    if not isinstance(token, str) or len(token) > 256:
+        raise ValueError("OIDC transaction cookie is invalid.")
+    return (
+        f"{OIDC_TRANSACTION_COOKIE_NAME}={token}; "
+        "Path=/; HttpOnly; Secure; SameSite=Lax"
+    )
+
+
+def clear_oidc_transaction_cookie_header() -> str:
+    return (
+        f"{OIDC_TRANSACTION_COOKIE_NAME}=; "
+        "Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+    )
+
+
+def _oidc_callback_error_headers() -> dict[str, str]:
+    return {
+        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+        "Cache-Control": "no-store",
+    }
+
+
+def _send_oidc_callback_rejection(
+    request: object,
+    status_code: int,
+    message: str,
+) -> None:
+    _send_json_with_headers(
+        request,
+        status_code,
+        {"error": message},
+        _oidc_callback_error_headers(),
+    )
+
+
+def _resolve_request_context(
+    request: object,
+    *,
+    error_headers: dict[str, object] | None = None,
+) -> bool:
+    def reject(status_code: int, message: str) -> None:
+        if error_headers is None:
+            request.send_error(status_code, message)
+            return
+        _send_json_with_headers(request, status_code, {"error": message}, error_headers)
+
     token = _read_session_cookie(request)
     if token is not None and SESSION_MANAGER is not None:
         try:
             session = SESSION_MANAGER.resolve(token)
         except SessionStorageUnavailable:
-            request.send_error(503, "Authenticated session storage is unavailable")
+            reject(503, "Authenticated session storage is unavailable")
             return False
         if session is not None:
             authenticated_principal = None
             if session.account_identity is not None:
                 if session.authentication_context is None:
-                    request.send_error(503, "Authenticated session storage is unavailable")
+                    reject(503, "Authenticated session storage is unavailable")
                     return False
                 authenticated_principal = AuthenticatedPrincipal(
                     session.account_identity,
@@ -889,13 +1017,13 @@ def _resolve_request_context(request: object) -> bool:
     try:
         principal = PRINCIPAL_RESOLVER.resolve(request)
     except Exception:
-        request.send_error(503, "Principal resolution is unavailable")
+        reject(503, "Principal resolution is unavailable")
         return False
     if type(principal) is not Principal:
-        request.send_error(503, "Principal resolution is unavailable")
+        reject(503, "Principal resolution is unavailable")
         return False
     if principal.authenticated:
-        request.send_error(401, "A valid server-side session is required")
+        reject(401, "A valid server-side session is required")
         return False
     request.request_context = HTTPRequestContext(principal=principal)
     return True
@@ -922,7 +1050,7 @@ def _require_csrf(request: object, parsed) -> bool:
     return True
 
 
-def _send_json_with_headers(request: object, status_code: int, payload: dict, headers: dict[str, str]) -> None:
+def _send_json_with_headers(request: object, status_code: int, payload: dict, headers: dict[str, object]) -> None:
     test_sender = getattr(request, "_send_json_with_headers", None)
     if callable(test_sender):
         test_sender(status_code, payload, headers)
@@ -932,7 +1060,11 @@ def _send_json_with_headers(request: object, status_code: int, payload: dict, he
     request.send_header("Content-Type", "application/json")
     request.send_header("Content-Length", str(len(body)))
     for name, value in headers.items():
-        request.send_header(name, value)
+        if isinstance(value, list):
+            for item in value:
+                request.send_header(name, item)
+        else:
+            request.send_header(name, str(value))
     request.end_headers()
     request.wfile.write(body)
 
@@ -1146,6 +1278,252 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == OIDC_CALLBACK_PATH:
+            if OIDC_ADAPTER is None or OIDC_STATE_STORE is None or SESSION_MANAGER is None:
+                _send_oidc_callback_rejection(
+                    self,
+                    503,
+                    "OIDC authentication is unavailable",
+                )
+                return
+            if not _request_is_tls(self):
+                _send_oidc_callback_rejection(
+                    self,
+                    403,
+                    "OIDC authentication requires HTTPS",
+                )
+                return
+            try:
+                context_resolved = _resolve_request_context(
+                    self,
+                    error_headers=_oidc_callback_error_headers(),
+                )
+            except Exception:
+                _send_oidc_callback_rejection(
+                    self,
+                    500,
+                    "OIDC authentication could not be completed",
+                )
+                return
+            if not context_resolved:
+                return
+            if self.request_context.principal.authenticated:
+                _send_oidc_callback_rejection(
+                    self,
+                    409,
+                    "A server-side session is already active",
+                )
+                return
+            transaction_token = _read_oidc_transaction_cookie(self)
+            if not isinstance(transaction_token, str):
+                _send_json_with_headers(
+                    self,
+                    401,
+                    {
+                        "status": "OIDC_AUTH_FAILED",
+                        "safe": False,
+                        "message": "OIDC transaction cookie is missing.",
+                    },
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            parameters: dict[str, list[str]] = {}
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+                parameters.setdefault(name, []).append(value)
+            if set(parameters) - {"code", "state", "error", "error_description", "session_state"}:
+                _send_json_with_headers(
+                    self,
+                    400,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC callback parameters are invalid."},
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            provider_error = "error" in parameters
+            state_values = parameters.get("state", [])
+            code_values = parameters.get("code", [])
+            if (
+                len(state_values) != 1
+                or (not provider_error and len(code_values) != 1)
+            ):
+                _send_json_with_headers(
+                    self,
+                    401,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC callback parameters are invalid."},
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            try:
+                state_record = OIDC_STATE_STORE.consume(
+                    state_values[0],
+                    transaction_token=transaction_token,
+                )
+            except OIDCUnavailable:
+                _send_oidc_callback_rejection(
+                    self,
+                    503,
+                    "OIDC authentication is temporarily unavailable",
+                )
+                return
+            except Exception:
+                _send_oidc_callback_rejection(
+                    self,
+                    500,
+                    "OIDC authentication could not be completed",
+                )
+                return
+            if state_record is None:
+                _send_json_with_headers(
+                    self,
+                    401,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC state is invalid or expired."},
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            if provider_error:
+                error_values = parameters["error"]
+                malformed_provider_error = (
+                    len(error_values) != 1
+                    or not error_values[0]
+                    or bool(code_values)
+                    or len(parameters.get("error_description", [])) > 1
+                    or len(parameters.get("session_state", [])) > 1
+                )
+                _send_json_with_headers(
+                    self,
+                    401,
+                    {
+                        "status": "OIDC_AUTH_FAILED",
+                        "safe": False,
+                        "message": (
+                            "OIDC callback parameters are invalid."
+                            if malformed_provider_error
+                            else "OIDC authentication was rejected."
+                        ),
+                    },
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            try:
+                id_token = OIDC_ADAPTER.exchange_authorization_code(
+                    code_values[0],
+                    state_record,
+                )
+                evidence = OIDCCallbackEvidence(id_token, state_record.nonce)
+                resolver = OIDCIdentityResolver(OIDC_ADAPTER, IDENTITY_REPOSITORY)
+                credentials = SESSION_MANAGER.create_identity_session(
+                    resolver,
+                    evidence,
+                )
+            except OIDCAuthorizationError:
+                _send_json_with_headers(
+                    self,
+                    401,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC authentication failed."},
+                    _oidc_callback_error_headers(),
+                )
+                return
+            except (
+                OIDCUnavailable,
+                SessionStorageUnavailable,
+                IdentityStorageUnavailable,
+            ):
+                _send_json_with_headers(
+                    self,
+                    503,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC authentication is temporarily unavailable."},
+                    _oidc_callback_error_headers(),
+                )
+                return
+            except Exception:
+                _send_json_with_headers(
+                    self,
+                    500,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC authentication could not be completed."},
+                    _oidc_callback_error_headers(),
+                )
+                return
+            if credentials is None:
+                _send_json_with_headers(
+                    self,
+                    401,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC identity is unknown or disabled."},
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            try:
+                csrf_token = SESSION_MANAGER.csrf_token(credentials.session.session_id)
+            except SessionStorageUnavailable:
+                _send_json_with_headers(
+                    self,
+                    503,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC authentication is temporarily unavailable."},
+                    _oidc_callback_error_headers(),
+                )
+                return
+            except Exception:
+                _send_json_with_headers(
+                    self,
+                    500,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC authentication could not be completed."},
+                    _oidc_callback_error_headers(),
+                )
+                return
+            if csrf_token is None:
+                _send_json_with_headers(
+                    self,
+                    503,
+                    {"status": "OIDC_AUTH_FAILED", "safe": False,
+                     "message": "OIDC session creation failed."},
+                    {
+                        "Set-Cookie": clear_oidc_transaction_cookie_header(),
+                        "Cache-Control": "no-store",
+                    },
+                )
+                return
+            _send_json_with_headers(
+                self,
+                200,
+                {
+                    "authenticated": True,
+                    "csrf_token": csrf_token,
+                    "active_profile_id": None,
+                },
+                {
+                    "Set-Cookie": [
+                        session_cookie_header(credentials.session_token),
+                        clear_oidc_transaction_cookie_header(),
+                    ],
+                    "Cache-Control": "no-store",
+                },
+            )
+            return
         if parsed.path == "/api" or parsed.path.startswith("/api/"):
             if _reject_client_identity(self, parsed) or not _resolve_request_context(self):
                 return
@@ -1449,6 +1827,49 @@ class PARMARRequestHandler(BaseHTTPRequestHandler):
         if not _resolve_request_context(self):
             return
         if not _require_csrf(self, parsed):
+            return
+
+        if parsed.path == "/api/auth/oidc/start":
+            if (
+                OIDC_ADAPTER is None
+                or OIDC_STATE_STORE is None
+                or OIDC_CONFIGURATION is None
+                or SESSION_MANAGER is None
+            ):
+                self.send_error(503, "OIDC authentication is unavailable")
+                return
+            if self.request_context.principal.authenticated:
+                self.send_error(409, "A server-side session is already active")
+                return
+            if parsed.query or payload:
+                self.send_error(400, "OIDC login accepts an empty JSON object only")
+                return
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                self.send_error(415, "OIDC login requires application/json")
+                return
+            try:
+                state, challenge, transaction_token = OIDC_STATE_STORE.create(
+                    OIDC_CONFIGURATION.redirect_uri,
+                )
+                authorization_url = OIDC_ADAPTER.authorization_url(
+                    state,
+                    challenge,
+                )
+            except (OIDCUnavailable, OIDCAuthorizationError):
+                self.send_error(503, "OIDC authentication is unavailable")
+                return
+            except Exception:
+                self.send_error(500, "OIDC authentication could not be completed")
+                return
+            _send_json_with_headers(
+                self,
+                200,
+                {"authorization_url": authorization_url},
+                {
+                    "Set-Cookie": oidc_transaction_cookie_header(transaction_token),
+                    "Cache-Control": "no-store",
+                },
+            )
             return
 
         if parsed.path == "/api/auth/development":

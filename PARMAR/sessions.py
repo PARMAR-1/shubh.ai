@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Callable, Iterator, Protocol
 from uuid import UUID, uuid4
 
 from PARMAR.identity import Principal, TRUSTED_IDENTITY_SOURCE
@@ -138,6 +138,8 @@ class SessionRepository(Protocol):
     ) -> ServerSession | None: ...
 
     def revoke(self, session_id: UUID, now: datetime) -> bool: ...
+
+    def revoke_account(self, account_identity: AccountIdentity, now: datetime) -> bool: ...
 
     def revoke_identity_evidence(
         self,
@@ -345,6 +347,29 @@ class InMemorySessionRepository:
             )
             return True
 
+    def revoke_account(self, account_identity: AccountIdentity, now: datetime) -> bool:
+        if type(account_identity) is not AccountIdentity:
+            return False
+        revoked_any = False
+        with self._lock:
+            for session in tuple(self._sessions.values()):
+                if session.account_identity != account_identity or session.status != "ACTIVE":
+                    continue
+                record = self._identity_evidence.get(session.identity_evidence_id)
+                if self._identity_record_matches(session, record):
+                    self._identity_evidence[record.evidence_id] = replace(
+                        record,
+                        state=IdentityEvidenceState.REVOKED,
+                    )
+                self._sessions[session.session_id] = replace(
+                    session,
+                    status="REVOKED",
+                    revoked_at=now,
+                    active_profile_id=None,
+                )
+                revoked_any = True
+        return revoked_any
+
     def revoke_identity_evidence(
         self,
         evidence_id: UUID,
@@ -500,6 +525,11 @@ class SQLiteSessionRepository:
         self._initialized = False
         self._fresh_database = False
         self._database_identity: tuple[int, int] | None = None
+
+    def _csrf_signing_secret(self) -> bytes:
+        return hashlib.sha256(
+            b"PARMAR-CSRF-SIGNING-KEY-v1\0" + self._integrity_key
+        ).digest()
 
     @classmethod
     def from_environment(cls, environ: dict[str, str] | None = None) -> "SQLiteSessionRepository":
@@ -1277,6 +1307,51 @@ class SQLiteSessionRepository:
             )
             return cursor.rowcount == 1
 
+    def revoke_account(self, account_identity: AccountIdentity, now: datetime) -> bool:
+        if type(account_identity) is not AccountIdentity:
+            return False
+        revoked_any = False
+        with self._connection(write=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM sessions WHERE account_identity = ? AND status = 'ACTIVE'",
+                (account_identity.serialize(),),
+            ).fetchall()
+            for row in rows:
+                session = self._session_from_row(row)
+                if session.account_identity != account_identity:
+                    raise SessionStorageUnavailable(
+                        "Authenticated session storage is unavailable."
+                    )
+                evidence = self._active_evidence_for_session(connection, session)
+                if evidence is not None:
+                    self._write_evidence_state(
+                        connection,
+                        evidence,
+                        IdentityEvidenceState.REVOKED,
+                    )
+                revoked = replace(
+                    session,
+                    status="REVOKED",
+                    revoked_at=now,
+                    active_profile_id=None,
+                )
+                cursor = connection.execute(
+                    "UPDATE sessions SET status = 'REVOKED', revoked_at = ?, "
+                    "active_profile_id = NULL, integrity_tag = ? "
+                    "WHERE session_id = ? AND status = 'ACTIVE'",
+                    (
+                        now.isoformat(),
+                        self._session_integrity_tag(
+                            revoked,
+                            row["token_hash"],
+                            self._integrity_key,
+                        ),
+                        str(session.session_id),
+                    ),
+                )
+                revoked_any = revoked_any or cursor.rowcount == 1
+        return revoked_any
+
     def revoke_identity_evidence(
         self,
         evidence_id: UUID,
@@ -1512,6 +1587,7 @@ class SessionManager:
         policy: SessionPolicy,
         *,
         csrf_secret: bytes | None = None,
+        account_status_lookup: Callable[[AccountIdentity], bool] | None = None,
     ) -> None:
         required_methods = (
             "create",
@@ -1520,6 +1596,7 @@ class SessionManager:
             "get_by_session_id",
             "resolve_and_touch",
             "revoke",
+            "revoke_account",
             "revoke_identity_evidence",
             "get_identity_evidence_state",
             "select_profile",
@@ -1529,9 +1606,48 @@ class SessionManager:
             raise TypeError("A session repository implementation is required.")
         self.repository = repository
         self.policy = policy
-        self._csrf_secret = csrf_secret or secrets.token_bytes(32)
+        self._account_status_lookup = account_status_lookup
+        if csrf_secret is None:
+            csrf_secret = (
+                repository._csrf_signing_secret()
+                if isinstance(repository, SQLiteSessionRepository)
+                else secrets.token_bytes(32)
+            )
+        self._csrf_secret = csrf_secret
         if len(self._csrf_secret) < 32:
             raise ValueError("The CSRF signing secret must contain at least 32 bytes.")
+
+    def set_account_status_lookup(
+        self,
+        lookup: Callable[[AccountIdentity], bool],
+    ) -> None:
+        if not callable(lookup):
+            raise TypeError("An account status lookup is required.")
+        self._account_status_lookup = lookup
+
+    def _trusted_account_is_active(
+        self,
+        account_identity: AccountIdentity,
+        now: datetime,
+    ) -> bool:
+        lookup = self._account_status_lookup
+        if lookup is None:
+            raise SessionStorageUnavailable(
+                "Authenticated account status is unavailable."
+            )
+        try:
+            active = lookup(account_identity)
+        except Exception as error:
+            raise SessionStorageUnavailable(
+                "Authenticated account status is unavailable."
+            ) from error
+        if type(active) is not bool:
+            raise SessionStorageUnavailable(
+                "Authenticated account status is unavailable."
+            )
+        if not active:
+            self.repository.revoke_account(account_identity, now)
+        return active
 
     @staticmethod
     def _now(value: datetime | None) -> datetime:
@@ -1595,6 +1711,8 @@ class SessionManager:
             or not authentication_is_current(principal.authentication, now=current)
         ):
             return None
+        if not self._trusted_account_is_active(principal.account_identity, current):
+            return None
         absolute_expiry = min(
             current + timedelta(seconds=self.policy.absolute_timeout_seconds),
             principal.authentication.expires_at,
@@ -1619,6 +1737,8 @@ class SessionManager:
         if token_hash is None:
             raise RuntimeError("Session token generation failed.")
         if not self.repository.create_identity(session, token_hash):
+            return None
+        if not self._trusted_account_is_active(principal.account_identity, current):
             return None
         return SessionCredentials(session=session, session_token=token)
 
@@ -1681,11 +1801,27 @@ class SessionManager:
         token_hash = self._token_hash(token)
         if token_hash is None:
             return None
-        return self.repository.resolve_and_touch(
+        current = self._now(now)
+        existing = self.repository.get_by_token_hash(token_hash)
+        if existing is None or existing.status != "ACTIVE":
+            return None
+        if (
+            existing.account_identity is not None
+            and not self._trusted_account_is_active(existing.account_identity, current)
+        ):
+            return None
+        session = self.repository.resolve_and_touch(
             token_hash,
-            self._now(now),
+            current,
             self.policy.idle_timeout_seconds,
         )
+        if (
+            session is not None
+            and session.account_identity is not None
+            and not self._trusted_account_is_active(session.account_identity, current)
+        ):
+            return None
+        return session
 
     def rotate(
         self,
@@ -1727,6 +1863,11 @@ class SessionManager:
             current,
         )
         if rotated is None:
+            return None
+        if (
+            rotated.account_identity is not None
+            and not self._trusted_account_is_active(rotated.account_identity, current)
+        ):
             return None
         return SessionCredentials(session=rotated, session_token=new_token)
 
@@ -1777,7 +1918,30 @@ class SessionManager:
         *,
         now: datetime | None = None,
     ) -> ServerSession | None:
-        return self.repository.select_profile(session_id, user_id, profile_id, self._now(now))
+        current = self._now(now)
+        session = self.repository.get_by_session_id(session_id)
+        if (
+            session is None
+            or session.status != "ACTIVE"
+            or (
+                session.account_identity is not None
+                and not self._trusted_account_is_active(session.account_identity, current)
+            )
+        ):
+            return None
+        selected = self.repository.select_profile(
+            session_id,
+            user_id,
+            profile_id,
+            current,
+        )
+        if (
+            selected is not None
+            and selected.account_identity is not None
+            and not self._trusted_account_is_active(selected.account_identity, current)
+        ):
+            return None
+        return selected
 
     def logout(self, token: object, *, now: datetime | None = None) -> bool:
         token_hash = self._token_hash(token)
@@ -1794,6 +1958,10 @@ class SessionManager:
         if (
             session is None
             or session.status != "ACTIVE"
+            or (
+                session.account_identity is not None
+                and not self._trusted_account_is_active(session.account_identity, current)
+            )
             or current >= session.idle_expires_at
             or current >= session.absolute_expires_at
         ):

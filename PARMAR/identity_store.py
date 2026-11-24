@@ -646,6 +646,9 @@ class SQLiteIdentityRepository:
         account = self.get_account(account_identity)
         return account.status if account is not None else None
 
+    def is_account_active(self, account_identity: AccountIdentity) -> bool:
+        return self.get_account_status(account_identity) is AccountStatus.ACTIVE
+
     def find_existing_account(self, identity: ProviderIdentity) -> AccountIdentity | None:
         if type(identity) is not ProviderIdentity:
             return None

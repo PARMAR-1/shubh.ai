@@ -9,6 +9,7 @@ from PARMAR.identity_contracts import (
 
 def trusted_session(manager, account_identity=None, *, now=None):
     account_identity = account_identity or AccountIdentity.generate()
+    manager.set_account_status_lookup(lambda _identity: True)
 
     class Resolver:
         def resolve(self, _evidence, *, now=None):
