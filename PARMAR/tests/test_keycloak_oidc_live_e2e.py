@@ -596,6 +596,19 @@ def _session_count(live: LiveEnvironment) -> int:
         raise LiveE2EFailure("The run-local session store could not be inspected.") from None
 
 
+def _session_store_snapshot(live: LiveEnvironment) -> list[tuple]:
+    session_path = bootstrap._expected_database_paths(live.run_context)[
+        "PARMAR_SESSION_DB_PATH"
+    ]
+    try:
+        with sqlite3.connect(session_path) as connection:
+            return connection.execute(
+                "SELECT * FROM sessions ORDER BY session_id"
+            ).fetchall()
+    except sqlite3.Error:
+        raise LiveE2EFailure("The run-local session store could not be inspected.") from None
+
+
 def _state_transaction_count(live: LiveEnvironment, state: str) -> int:
     state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()
     state_path = bootstrap._expected_database_paths(live.run_context)[
@@ -836,7 +849,9 @@ def test_error_safety_rejects_secrets_in_response_headers_and_token_fields():
 @pytest.mark.skipif(not LIVE_E2E_ENABLED, reason="Manual live Keycloak workflow only.")
 def test_invalid_state_and_callback_cookie_mismatch_are_rejected(live_environment):
     flow = _start_login(live_environment)
-    sessions_before = _session_count(live_environment)
+    identity_before = _identity_store_snapshot(live_environment)
+    sessions_before = _session_store_snapshot(live_environment)
+    session_count_before = len(sessions_before)
     invalid_state = secrets.token_urlsafe(32)
     response = _direct_callback(
         live_environment,
@@ -850,7 +865,7 @@ def test_invalid_state_and_callback_cookie_mismatch_are_rejected(live_environmen
         response,
         401,
         extra_sensitive=(invalid_state, "invalid-state-test-code"),
-        expected_session_count=sessions_before,
+        expected_session_count=session_count_before,
     )
 
     flow = _start_login(live_environment)
@@ -972,6 +987,11 @@ def test_real_keycloak_provider_error_consumes_state_without_session(
         ) is None,
         "The provider error was not safely consumed without token exchange or session issuance.",
     )
+    _check(
+        _identity_store_snapshot(live_environment) == identity_before
+        and _session_store_snapshot(live_environment) == sessions_before,
+        "The provider error changed identity or trusted session records.",
+    )
 
     replay_request = urllib.request.Request(
         flow.callback_url,
@@ -989,9 +1009,14 @@ def test_real_keycloak_provider_error_consumes_state_without_session(
         replay_response,
         401,
         extra_sensitive=(provider_error,),
-        expected_session_count=sessions_before,
+        expected_session_count=session_count_before,
     )
-    _check(not exchange_calls, "Replaying the provider error attempted a code exchange.")
+    _check(
+        not exchange_calls
+        and _identity_store_snapshot(live_environment) == identity_before
+        and _session_store_snapshot(live_environment) == sessions_before,
+        "Replaying the provider error exchanged a code or changed identity/session records.",
+    )
 
 
 @pytest.mark.skipif(not LIVE_E2E_ENABLED, reason="Manual live Keycloak workflow only.")

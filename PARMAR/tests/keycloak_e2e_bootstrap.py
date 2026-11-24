@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import http.client
 import hmac
 import json
 import os
@@ -178,18 +179,31 @@ class KeycloakAdminClient:
             raise E2EBootstrapError(
                 f"Keycloak Admin API returned HTTP {status}."
             ) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+        ):
             raise E2EBootstrapError("Keycloak Admin API is unavailable or timed out.") from None
 
-        with response:
-            status = response.status
-            if 300 <= status < 400:
-                raise E2EBootstrapError("Keycloak Admin API redirects are not permitted.")
-            if status not in allowed_statuses:
-                raise E2EBootstrapError(
-                    f"Keycloak Admin API returned HTTP {status}."
-                )
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        try:
+            with response:
+                status = response.status
+                if 300 <= status < 400:
+                    raise E2EBootstrapError("Keycloak Admin API redirects are not permitted.")
+                if status not in allowed_statuses:
+                    raise E2EBootstrapError(
+                        f"Keycloak Admin API returned HTTP {status}."
+                    )
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+        ):
+            raise E2EBootstrapError("Keycloak Admin API response could not be read safely.") from None
         if len(raw) > MAX_RESPONSE_BYTES:
             raise E2EBootstrapError("Keycloak returned an oversized response.")
         if not raw:

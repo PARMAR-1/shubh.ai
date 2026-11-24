@@ -1,4 +1,5 @@
 import io
+import http.client
 import json
 import sqlite3
 import ssl
@@ -583,6 +584,29 @@ def test_provider_outage_and_timeout_are_bounded_and_do_not_leak_response_body(
     monkeypatch.setattr(timeout_client._opener, "open", timed_out)
     with pytest.raises(bootstrap.E2EBootstrapError, match="unavailable or timed out"):
         timeout_client.request_json("GET", "/realms/master/.well-known/openid-configuration")
+
+
+def test_malformed_http_protocol_errors_do_not_leak_bearer_credentials(tmp_path):
+    bearer = "synthetic-bearer-must-not-be-logged"
+    client = bootstrap.KeycloakAdminClient(
+        tmp_path / "unused-ca.pem",
+        ssl_context=ssl.create_default_context(),
+    )
+
+    class MalformedStatusOpener:
+        def open(self, request, *, timeout):
+            del request, timeout
+            raise http.client.BadStatusLine(f"Bearer {bearer}")
+
+    client._opener = MalformedStatusOpener()
+    with pytest.raises(bootstrap.E2EBootstrapError) as raised:
+        client.request_json(
+            "GET",
+            "/admin/realms",
+            access_token=bearer,
+        )
+    assert bearer not in str(raised.value)
+    assert "Bearer" not in str(raised.value)
 
 
 def test_discovery_timeout_fails_closed():
