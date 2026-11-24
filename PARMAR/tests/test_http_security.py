@@ -902,6 +902,84 @@ def test_malformed_tls_certificate_fails_before_server_bind(monkeypatch, tmp_pat
         futuristic_app.main()
 
 
+def oidc_startup_environment(certificate="", private_key=""):
+    return {
+        "PARMAR_ENVIRONMENT": "test",
+        "PARMAR_UI_HOST": "127.0.0.1",
+        "PARMAR_UI_ORIGIN": "https://127.0.0.1:8080",
+        "PARMAR_UI_TLS_CERTFILE": str(certificate),
+        "PARMAR_UI_TLS_KEYFILE": str(private_key),
+        "PARMAR_OIDC_ENABLED": "true",
+        "PARMAR_OIDC_ISSUER": "https://keycloak.example.test/realms/parmar",
+        "PARMAR_OIDC_CLIENT_ID": "parmar-web",
+        "PARMAR_OIDC_CLIENT_SECRET": "test-secret",
+        "PARMAR_OIDC_AUDIENCE": "parmar-web",
+        "PARMAR_OIDC_REDIRECT_URI": (
+            "https://127.0.0.1:8080/api/auth/oidc/callback"
+        ),
+    }
+
+
+def test_oidc_startup_requires_tls_listener(tls_keypairs):
+    certificate, private_key = tls_keypairs["first"]
+    settings = oidc_startup_environment(certificate, private_key)
+    settings.pop("PARMAR_UI_TLS_CERTFILE")
+    settings.pop("PARMAR_UI_TLS_KEYFILE")
+
+    with pytest.raises(ValueError, match="require a valid TLS certificate"):
+        futuristic_app._validate_startup_configuration(settings)
+
+
+@pytest.mark.parametrize(("certificate", "private_key"), [("", "configured-key"), ("configured-cert", "")])
+def test_oidc_startup_rejects_missing_certificate_or_private_key(certificate, private_key):
+    with pytest.raises(ValueError, match="Configure both PARMAR_UI_TLS_CERTFILE"):
+        futuristic_app._validate_startup_configuration(
+            oidc_startup_environment(certificate, private_key)
+        )
+
+
+def test_oidc_startup_rejects_invalid_tls_material():
+    settings = oidc_startup_environment("/missing/oidc.crt", "/missing/oidc.key")
+
+    with pytest.raises(ValueError, match="could not be loaded"):
+        futuristic_app._validate_startup_configuration(settings)
+
+
+def test_oidc_startup_requires_redirect_to_match_https_origin_and_callback(tls_keypairs):
+    certificate, private_key = tls_keypairs["first"]
+    settings = oidc_startup_environment(certificate, private_key)
+    settings["PARMAR_OIDC_REDIRECT_URI"] = (
+        "https://localhost:8080/api/auth/oidc/callback"
+    )
+
+    with pytest.raises(ValueError, match="must match the configured HTTPS UI origin"):
+        futuristic_app._validate_startup_configuration(settings)
+
+
+def test_valid_https_oidc_startup_configuration(tls_keypairs):
+    certificate, private_key = tls_keypairs["first"]
+    settings = oidc_startup_environment(certificate, private_key)
+
+    host, port, context = futuristic_app._validate_startup_configuration(settings)
+
+    assert host == "127.0.0.1"
+    assert port == futuristic_app.UI_PORT
+    assert context is not None
+    assert context.protocol == futuristic_app.ssl.PROTOCOL_TLS_SERVER
+
+
+def test_oidc_disabled_preserves_http_local_demo_startup():
+    settings = {
+        "PARMAR_ENVIRONMENT": "development",
+        "PARMAR_UI_HOST": "127.0.0.1",
+        "PARMAR_OIDC_ENABLED": "false",
+    }
+
+    host, port, context = futuristic_app._validate_startup_configuration(settings)
+
+    assert (host, port, context) == ("127.0.0.1", futuristic_app.UI_PORT, None)
+
+
 def test_mismatched_tls_certificate_and_key_fail_before_server_bind(monkeypatch, tls_keypairs):
     certificate, _private_key = tls_keypairs["first"]
     _other_certificate, other_private_key = tls_keypairs["second"]

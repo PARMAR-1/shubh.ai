@@ -1,1 +1,2 @@
 pytest==9.2.0
+PyJWT[crypto]==2.10.1

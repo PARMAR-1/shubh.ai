@@ -1,0 +1,49 @@
+{
+  "realm": {
+    "realm": "parmar-e2e",
+    "enabled": true,
+    "sslRequired": "all",
+    "registrationAllowed": false,
+    "registrationEmailAsUsername": false,
+    "resetPasswordAllowed": false,
+    "rememberMe": false,
+    "verifyEmail": false,
+    "loginWithEmailAllowed": false,
+    "duplicateEmailsAllowed": false,
+    "bruteForceProtected": true,
+    "eventsEnabled": false,
+    "adminEventsEnabled": false
+  },
+  "client": {
+    "clientId": "parmar-e2e-client",
+    "name": "PARMAR disposable OIDC E2E client",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "clientAuthenticatorType": "client-secret",
+    "publicClient": false,
+    "standardFlowEnabled": true,
+    "implicitFlowEnabled": false,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": false,
+    "authorizationServicesEnabled": false,
+    "redirectUris": [
+      "https://127.0.0.1:8080/api/auth/oidc/callback"
+    ],
+    "webOrigins": [
+      "https://127.0.0.1:8080"
+    ],
+    "attributes": {
+      "pkce.code.challenge.method": "S256"
+    }
+  },
+  "test_user": {
+    "username": "parmar-e2e-user",
+    "enabled": true,
+    "emailVerified": false
+  },
+  "unbound_test_user": {
+    "username": "parmar-e2e-unbound-user",
+    "enabled": true,
+    "emailVerified": false
+  }
+}
