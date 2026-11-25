@@ -14,7 +14,7 @@ jobs:
     env:
       PARMAR_E2E_RUN_ID: ${{ github.run_id }}
       PARMAR_E2E_RUN_ATTEMPT: ${{ github.run_attempt }}
-      # User-approved immutable linux/amd64 child digest; no signature claim is made.
+      # Pinned immutable linux/amd64 child digest; selection approval/provenance are not evidenced here.
       PARMAR_KEYCLOAK_IMAGE: "quay.io/keycloak/keycloak@sha256:75b5c435a83b530caba5923922f93d47b2e3f8b4ad9e79200581122996653e55"
     steps:
       - name: Check out repository
@@ -45,7 +45,7 @@ jobs:
         timeout-minutes: 3
         run: python3 -m PARMAR.tests.keycloak_e2e_bootstrap prepare
 
-      - name: Pull reviewed immutable Keycloak image
+      - name: Pull pinned immutable Keycloak image
         timeout-minutes: 10
         run: bash .github/scripts/parmar-keycloak-oidc-e2e-infra.sh pull-image
 

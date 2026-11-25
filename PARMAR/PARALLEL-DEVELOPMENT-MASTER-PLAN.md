@@ -195,8 +195,9 @@ technical decisions and evidence.
   cross-device sync, or local model runtime is verified. Appearance and
   environment customization remain decision-gated; do not claim them
   complete.
-- **Actions:** the current approval continuation resumes provider generation;
-  Part 13 does not establish a general-purpose connector executor or
+- **Actions:** approved-chat continuation is blocked by the current runtime
+  atomic-fence NO-GO before provider dispatch; Part 13 does not establish a
+  general-purpose connector executor or
   independently verified action outcome.
 
 **Privacy/security blockers**

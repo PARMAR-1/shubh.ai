@@ -1,10 +1,26 @@
 # PARMAR Recovery and Cutover Readiness Report
 
-**Scope:** Static inspection of the design, prior evidence/review documents, current runtime gates, per-store schema initialization, backup tooling, tests, and AETHER boundary docs. No database or process was touched; no tests or migrations were run.
+**Original scope:** Static inspection of the design, prior evidence/review documents, current runtime gates, per-store schema initialization, backup tooling, tests, and AETHER boundary docs. At that review, no database or process was touched and no tests or migrations were run.
 
 ## Executive finding
 
-**Recovery/cutover readiness: NOT PROVEN.** Most controls are specified only in the design. There is no shared migration implementation, global writer quiescence mechanism, authority identifier/manifest startup gate, old-binary exclusion, SQLite backup/restore procedure, or `RECOVERY_REQUIRED` approval state.
+**Recovery/cutover readiness: NOT PROVEN.** Most controls are specified only in design proposals. There is no shared migration implementation, global writer quiescence mechanism, authority identifier/manifest startup gate, old-binary exclusion, approved/implemented/exercised SQLite backup/restore procedure, or `RECOVERY_REQUIRED` approval state.
+
+## Revalidation — 2026-11-25
+
+The current [B2 design](./ACCOUNT-BINDING-B2-SCHEMA-DESIGN.md) §§9–10 and
+[shared-authority migration design](./PARMAR-SHARED-AUTHORITY-MIGRATION-DESIGN.md)
+§§5–8 specify proposed backup, restore, rollback, recovery, and monitoring
+controls. This corrects any reading of the original finding as claiming no
+design proposal exists; these proposals are not approved operational
+procedures, implemented controls, or exercised evidence, so the NOT PROVEN
+status is unchanged.
+
+The later PARMAR offline regression run passed 954 tests. The manual live
+Keycloak module reported 2 passed and 8 skipped with live mode disabled. No
+B2 prototype, DDL, migration, restore rehearsal, or live provider operation
+was run; the original audit's test statement remains an accurate historical
+scope description.
 
 ## Control-by-control evidence
 
@@ -14,7 +30,7 @@
 | Revoke old database write access | Repositories request mode 0600 on database files and mode 0700 on parent directories. The same service identity can reopen these files; no service-account privilege revocation or archival read-only cutover tool exists. | **NOT PROVEN.** File modes are not an old-process/version fence. |
 | Prevent stale binaries or mixed paths | Each store independently accepts `PARMAR_*_DB_PATH`; per-object `(device, inode)` checks detect replacement of that store’s file after initialization. Each store checks its own `PRAGMA user_version`. There is no shared authority ID, expected path-set check, or old-binary startup rejection. | **NOT PROVEN.** Independent valid database paths can still form a mixed authority set. |
 | Reject incomplete migration manifests | `migration_manifest` is specified in [PARMAR-SHARED-AUTHORITY-MIGRATION-DESIGN.md](./PARMAR-SHARED-AUTHORITY-MIGRATION-DESIGN.md) §3. No runtime table, writer, or startup check implements it. Search of source found no authority ID or manifest verification. | **NOT PROVEN.** |
-| Backup and restore source/destination SQLite | [scripts/parmar_backup.py](../scripts/parmar_backup.py) excludes SQLite/database suffixes. [docs/backup-recovery.md](../docs/backup-recovery.md) describes a Linux worktree archive, verification, and a dry-run restore plan; it explicitly offers no restore-write command. No SQLite online backup/restore path is present. | **NOT PROVEN.** Database snapshot consistency, restoration, and RPO/RTO are untested. |
+| Backup and restore source/destination SQLite | [scripts/parmar_backup.py](../scripts/parmar_backup.py) excludes SQLite/database suffixes. [docs/backup-recovery.md](../docs/backup-recovery.md) describes a Linux worktree archive, verification, and a dry-run restore plan; it explicitly offers no restore-write command. B2 and the shared-authority migration design specify proposed SQLite backup/restore steps, but no approved operational procedure or implemented path exists. | **NOT PROVEN.** Database snapshot consistency, restoration, and RPO/RTO are untested. |
 | Represent ambiguous in-flight approval | [interface/approvals.py](./interface/approvals.py), `ApprovalState`, `_APPROVAL_TRANSITIONS`, and `pending_approvals` state constraint include `EXECUTING` but not `RECOVERY_REQUIRED`. Current `EXECUTING` transitions include `CONSUMED`, `CANCELLED`, and `EXPIRED`; cancellation audit is included in the current HMAC-protected payload. The execution claim is stored separately from any provider/effect. | **NOT PROVEN.** Current state cannot represent a terminal indeterminate outcome in the proposed migration semantics. |
 | Make `RECOVERY_REQUIRED` terminal and non-executable | Design §§4 and 7 specify a future state and behavior. No implementation or test path for the state was found. | **NOT PROVEN.** It cannot currently be stored or verified as terminal. |
 | Safely limit rollback | Design §6 permits source restore only before the new authority accepts an operation and requires forward recovery afterwards. No cutover/rollback code, authority-write sentinel, migration controller, or tested rollback exists. | **NOT PROVEN.** This is a rule in a proposal, not an enforceable runtime boundary. |

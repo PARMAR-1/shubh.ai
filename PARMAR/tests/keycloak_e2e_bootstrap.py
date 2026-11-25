@@ -179,8 +179,19 @@ class KeycloakAdminClient:
             raise E2EBootstrapError(
                 f"Keycloak Admin API returned HTTP {status}."
             ) from None
+        except ssl.SSLCertVerificationError:
+            raise E2EBootstrapError(
+                "Keycloak TLS certificate verification failed."
+            ) from None
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, ssl.SSLCertVerificationError):
+                raise E2EBootstrapError(
+                    "Keycloak TLS certificate verification failed."
+                ) from None
+            raise E2EBootstrapError(
+                "Keycloak Admin API is unavailable or timed out."
+            ) from None
         except (
-            urllib.error.URLError,
             TimeoutError,
             OSError,
             http.client.HTTPException,
@@ -197,8 +208,19 @@ class KeycloakAdminClient:
                         f"Keycloak Admin API returned HTTP {status}."
                     )
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except ssl.SSLCertVerificationError:
+            raise E2EBootstrapError(
+                "Keycloak TLS certificate verification failed."
+            ) from None
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, ssl.SSLCertVerificationError):
+                raise E2EBootstrapError(
+                    "Keycloak TLS certificate verification failed."
+                ) from None
+            raise E2EBootstrapError(
+                "Keycloak Admin API response could not be read safely."
+            ) from None
         except (
-            urllib.error.URLError,
             TimeoutError,
             OSError,
             http.client.HTTPException,

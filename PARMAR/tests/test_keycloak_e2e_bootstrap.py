@@ -586,27 +586,207 @@ def test_provider_outage_and_timeout_are_bounded_and_do_not_leak_response_body(
         timeout_client.request_json("GET", "/realms/master/.well-known/openid-configuration")
 
 
-def test_malformed_http_protocol_errors_do_not_leak_bearer_credentials(tmp_path):
+@pytest.mark.parametrize(
+    ("failure_point", "exception_factory"),
+    [
+        (
+            "open",
+            lambda payload: http.client.BadStatusLine(
+                f"malformed status line: {payload}"
+            ),
+        ),
+        (
+            "open",
+            lambda payload: http.client.RemoteDisconnected(
+                f"disconnected with peer data: {payload}"
+            ),
+        ),
+        (
+            "read",
+            lambda payload: http.client.IncompleteRead(
+                payload.encode("utf-8"),
+                len(payload.encode("utf-8")) + 20,
+            ),
+        ),
+        (
+            "read",
+            lambda payload: http.client.BadStatusLine(
+                f"malformed response read: {payload}"
+            ),
+        ),
+        (
+            "read",
+            lambda payload: http.client.RemoteDisconnected(
+                f"disconnected while reading: {payload}"
+            ),
+        ),
+    ],
+    ids=(
+        "bad-status-line-on-open",
+        "remote-disconnect-on-open",
+        "incomplete-response-read",
+        "bad-status-line-on-read",
+        "remote-disconnect-on-read",
+    ),
+)
+def test_http_protocol_errors_are_sanitized_on_open_and_read(
+    tmp_path,
+    monkeypatch,
+    failure_point,
+    exception_factory,
+):
+    environ, _, context = prepared_run(tmp_path)
     bearer = "synthetic-bearer-must-not-be-logged"
+    runtime_secrets = bootstrap._load_secrets(context)
+    sensitive_values = (
+        bearer,
+        "synthetic-response-fragment-must-not-be-logged",
+        *runtime_secrets.values(),
+    )
+    payload = " ".join(sensitive_values)
     client = bootstrap.KeycloakAdminClient(
         tmp_path / "unused-ca.pem",
         ssl_context=ssl.create_default_context(),
     )
 
-    class MalformedStatusOpener:
-        def open(self, request, *, timeout):
-            del request, timeout
-            raise http.client.BadStatusLine(f"Bearer {bearer}")
+    class FailingResponse:
+        status = 200
 
-    client._opener = MalformedStatusOpener()
+        def read(self, size=-1):
+            del size
+            raise exception_factory(payload)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+            return False
+
+    class FailingOpener:
+        calls = 0
+
+        def open(self, request, *, timeout):
+            del timeout
+            self.calls += 1
+            assert request.get_header("Authorization") == f"Bearer {bearer}"
+            if failure_point == "open":
+                raise exception_factory(payload)
+            return FailingResponse()
+
+    opener = FailingOpener()
+    client._opener = opener
     with pytest.raises(bootstrap.E2EBootstrapError) as raised:
         client.request_json(
             "GET",
             "/admin/realms",
             access_token=bearer,
         )
-    assert bearer not in str(raised.value)
-    assert "Bearer" not in str(raised.value)
+    assert opener.calls == 1
+    assert all(value not in str(raised.value) for value in sensitive_values)
+    assert (
+        "unavailable or timed out"
+        if failure_point == "open"
+        else "response could not be read safely"
+    ) in str(raised.value)
+
+    opener.calls = 0
+
+    def fail_bootstrap(settings):
+        assert settings["PARMAR_E2E_RUN_ID"] == environ["PARMAR_E2E_RUN_ID"]
+        client.request_json(
+            "GET",
+            "/admin/realms",
+            access_token=bearer,
+        )
+
+    monkeypatch.setattr(bootstrap, "bootstrap_run", fail_bootstrap)
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        result = bootstrap.main(["bootstrap"], environ=environ)
+
+    assert result == 1
+    assert opener.calls == 1
+    assert all(value not in stderr.getvalue() for value in sensitive_values)
+    assert "Keycloak Admin API" in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [False, True],
+    ids=("direct-tls-error", "urlerror-wrapped"),
+)
+def test_tls_certificate_errors_are_sanitized_and_classified(
+    tmp_path,
+    monkeypatch,
+    wrapped,
+):
+    environ, _, context = prepared_run(tmp_path)
+    certificate_detail = "synthetic-certificate-detail-must-not-be-logged"
+    bearer = "synthetic-tls-bearer-must-not-be-logged"
+    runtime_secrets = bootstrap._load_secrets(context)
+    sensitive_values = (
+        certificate_detail,
+        bearer,
+        *runtime_secrets.values(),
+    )
+    failure = ssl.SSLCertVerificationError(
+        f"peer certificate contains {certificate_detail} and {bearer}"
+    )
+    if wrapped:
+        failure = urllib.error.URLError(failure)
+
+    client = bootstrap.KeycloakAdminClient(
+        tmp_path / "unused-ca.pem",
+        ssl_context=ssl.create_default_context(),
+    )
+
+    class FailingOpener:
+        calls = 0
+
+        def open(self, request, *, timeout):
+            del timeout
+            self.calls += 1
+            assert request.get_header("Authorization") == f"Bearer {bearer}"
+            raise failure
+
+    opener = FailingOpener()
+    client._opener = opener
+
+    def assert_sanitized_failure():
+        with pytest.raises(
+            bootstrap.E2EBootstrapError,
+            match="TLS certificate verification failed",
+        ) as raised:
+            client.request_json(
+                "GET",
+                "/realms/master/.well-known/openid-configuration",
+                access_token=bearer,
+            )
+        assert all(value not in str(raised.value) for value in sensitive_values)
+        assert opener.calls == 1
+
+    assert_sanitized_failure()
+
+    opener.calls = 0
+
+    def fail_bootstrap(settings):
+        assert settings["PARMAR_E2E_RUN_ID"] == environ["PARMAR_E2E_RUN_ID"]
+        client.request_json(
+            "GET",
+            "/realms/master/.well-known/openid-configuration",
+            access_token=bearer,
+        )
+
+    monkeypatch.setattr(bootstrap, "bootstrap_run", fail_bootstrap)
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        result = bootstrap.main(["bootstrap"], environ=environ)
+
+    assert result == 1
+    assert opener.calls == 1
+    assert all(value not in stderr.getvalue() for value in sensitive_values)
+    assert stderr.getvalue().count("TLS certificate verification failed") == 1
 
 
 def test_discovery_timeout_fails_closed():

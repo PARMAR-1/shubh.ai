@@ -123,7 +123,7 @@ def create_chat_approval(store, credentials, *, research=False):
     )
 
 
-def test_pending_approval_survives_store_restart_and_continues(approval_environment, monkeypatch):
+def test_analysis_approval_survives_restart_and_is_single_use(approval_environment, monkeypatch):
     database, key, store, manager, credentials = approval_environment
     created = post("/api/analyze", {"request": "Purchase a $500 software license"}, manager, credentials)
     assert created["status"] == 200

@@ -571,7 +571,7 @@ def test_identity_revocation_during_provider_call_withholds_later_release(monkey
     assert provider_calls == []
 
 
-def test_approved_chat_uses_original_review_calls_provider_once_and_releases_pass(monkeypatch):
+def test_approved_chat_runtime_no_go_blocks_provider_dispatch(monkeypatch):
     calls = _install_counting_chat_provider(monkeypatch)
     pending_result = _start_chat_approval()
 
@@ -732,7 +732,7 @@ def test_rejected_enforcement_after_approval_never_calls_chat_provider(monkeypat
     assert calls == []
 
 
-def test_approved_chat_provider_failure_has_distinct_failure_contract(monkeypatch):
+def test_approved_chat_runtime_no_go_prevents_provider_failure_path(monkeypatch):
     calls = _install_counting_chat_provider(monkeypatch, error=RuntimeError("provider offline"))
     pending_result = _start_chat_approval()
 
@@ -745,7 +745,7 @@ def test_approved_chat_provider_failure_has_distinct_failure_contract(monkeypatc
     assert calls == []
 
 
-def test_approved_chat_validator_failure_withholds_provider_output(monkeypatch):
+def test_approved_chat_runtime_no_go_prevents_validator_and_provider_execution(monkeypatch):
     from PARMAR.chat.response_safety import ResponseSafetyValidator
 
     calls = _install_counting_chat_provider(monkeypatch)
@@ -774,7 +774,7 @@ def test_approved_chat_validator_failure_withholds_provider_output(monkeypatch):
         ("This is safe to proceed, but it is not safe to proceed.", "UNCERTAIN", "WITHHELD", "WITHHELD"),
     ],
 )
-def test_approved_chat_provider_output_uses_response_safety_pipeline(
+def test_approved_chat_runtime_no_go_blocks_provider_outputs(
     monkeypatch, content, expected_safety, expected_disposition, expected_lifecycle,
 ):
     calls = _install_counting_chat_provider(monkeypatch, content=content)

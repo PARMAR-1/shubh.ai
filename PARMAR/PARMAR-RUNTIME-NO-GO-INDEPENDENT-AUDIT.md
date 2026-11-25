@@ -1,23 +1,51 @@
 # PARMAR Runtime NO-GO Independent Security Audit (Phase 3G.14)
 
+## Revalidation update — 2026-11-25
+
+The original audit below records the state assessed at that review. Reinspection
+of the current source and focused offline tests now verifies mitigation of
+Finding 1 for the reviewed entry points:
+
+- The anonymous `/api/chat` route forces `selected_provider="local-demo"` and
+  does not honor a client-requested external provider.
+- External chat dispatch requires a trusted execution check in the
+  orchestration path; direct calls without one are denied before provider
+  invocation.
+- Search dispatch requires an execution check and is denied when one is
+  absent.
+- Focused fake-provider/search tests passed: the Local Demo HTTP flow, the
+  anonymous chat/research flow, direct external-chat denial, and direct
+  search denial (4 passed, 2026-11-25).
+
+**Current Finding 1 status: MITIGATED IN CURRENT SOURCE; focused tests pass.**
+Independent Security review and deployment/configuration assessment remain
+pending. No live provider or deployment was accessed. The protected-operation
+atomic-fence remains **NO-GO**; this revalidation does not clear it or enable
+production authentication.
+
 ## Executive verdict
 
-# FAIL
+**Historical verdict: FAIL at the time of the original audit.**
 
-The inspected Phase 3G.1 guard is itself unconditional, and authenticated
-protected chat, approval continuation, memory mutation, profile/workspace
-writes, and session/profile selection appear to reach fail-closed checks before
-their protected effects. However, an anonymous `POST /api/chat` path can reach
-ordinary chat and research/provider dispatch without the authenticated NO-GO
-check or a required execution-authorization callback. If an external chat or
-search provider is enabled in server configuration, this path can cause
-unauthenticated outbound provider requests. That violates the documented
-anonymous Local Demo boundary and means the reviewed entry points do not
-reliably contain all consequential paths.
+The executive summary, entry-point inventory and detailed findings below
+preserve the original audit snapshot; use the revalidation above for the
+current Finding 1 status.
 
-This is a static source and test review. It does not establish whether an
-affected deployment has external providers enabled or whether the service is
-reachable from an untrusted network. Tests were not run.
+At the time of that audit, the inspected Phase 3G.1 guard was unconditional,
+and authenticated protected chat, approval continuation, memory mutation,
+profile/workspace writes, and session/profile selection appeared to reach
+fail-closed checks before their protected effects. However, an anonymous
+`POST /api/chat` path could reach ordinary chat and research/provider dispatch
+without the authenticated NO-GO check or a required execution-authorization
+callback. If an external chat or search provider was enabled in server
+configuration, this path could cause unauthenticated outbound provider
+requests. That violated the documented anonymous Local Demo boundary and
+meant the reviewed entry points did not reliably contain all consequential
+paths.
+
+The original review was static. It did not establish whether an affected
+deployment had external providers enabled or whether the service was reachable
+from an untrusted network. Tests had not been run at that time.
 
 ## Protected-operation inventory
 
@@ -28,8 +56,8 @@ reachable from an untrusted network. Tests were not run.
 | Protected memory mutation | The memory mutation HTTP route calls `_deny_unfenced_protected_operation` for `PROTECTED_MEMORY_MUTATION` before repository mutation. | **DENIED on the reviewed route.** |
 | Profile/workspace writes | Profile/workspace HTTP routes call the NO-GO helper with `PROFILE_WORKSPACE_WRITE` before repository writes. | **DENIED on the reviewed routes.** |
 | Session profile selection | The session/profile route checks `SESSION_PROFILE_SELECTION` before changing session profile context. | **DENIED on the reviewed route.** |
-| Anonymous `POST /api/chat` | The anonymous branch does not run the authenticated-chat NO-GO check and calls `ChatService.respond`. `research: true` can reach `SearchService.search`. | **BYPASS / FAIL.** Optional execution callbacks do not require authorization when absent. External providers may be selected by server configuration. |
-| Public stateless analysis and anonymous Local Demo | Documented as public/local demo behavior, but the anonymous chat service route may use configured external providers or search. | **Boundary not reliably enforced** for outbound provider/research activity. |
+| Anonymous `POST /api/chat` (original audit snapshot) | The anonymous branch did not run the authenticated-chat NO-GO check and called `ChatService.respond`. `research: true` could reach `SearchService.search`. | **BYPASS / FAIL at original audit.** Current revalidation is recorded above. |
+| Public stateless analysis and anonymous Local Demo (original audit snapshot) | Documented as public/local demo behavior, but the anonymous chat service route could use configured external providers or search. | **Boundary not reliably enforced at original audit** for outbound provider/research activity. |
 
 The principal guard is `require_atomic_authorization_fence` in
 [safety/runtime_no_go.py](./safety/runtime_no_go.py). Its known-operation
@@ -43,7 +71,10 @@ does not call it.
 
 **Severity: MEDIUM**  
 **Confidence: 8/10**  
-**Status: OPEN**
+**Status at original audit: OPEN.**
+
+**Current revalidation status:** Mitigated in current source; focused tests
+passed on 2026-11-25. Independent Security/deployment closure remains pending.
 
 **Evidence and source locations**
 
@@ -101,23 +132,34 @@ No fix was made in this read-only audit.
 
 **Severity: LOW**  
 **Confidence: 8/10**  
-**Status: OPEN**
+**Status at audit time: OPEN; current revalidation: CLOSED**
 
 - [VOKKI-PART13-PRIVACY-SECURITY-GOVERNANCE-REPORT.md](./VOKKI-PART13-PRIVACY-SECURITY-GOVERNANCE-REPORT.md)
   and [PARALLEL-DEVELOPMENT-MASTER-PLAN.md](./PARALLEL-DEVELOPMENT-MASTER-PLAN.md)
-  contain descriptions that approved continuation resumes provider generation.
-- `tests/test_approval_integrity.py` includes
+  contained descriptions at audit time that approved continuation resumes
+  provider generation.
+- `tests/test_approval_integrity.py` included at audit time
   `test_approved_chat_uses_original_review_calls_provider_once_and_releases_pass`;
-  the inspected assertions expect NO-GO and zero provider calls, so the name
-  can suggest behavior the test no longer permits.
-- `tests/test_approval_persistence.py::test_pending_approval_survives_store_restart_and_continues`
-  verifies persistence/approval state and `execution_allowed=True` for a
-  review-only approval record; it does not demonstrate provider execution.
+  the inspected assertions expected NO-GO and zero provider calls, so the name
+  could suggest behavior the test no longer permitted.
+- The test named
+  `test_pending_approval_survives_store_restart_and_continues` at audit time
+  verified persistence/approval state and `execution_allowed=True` for a
+  review-only approval record; it did not demonstrate provider execution.
 
-**Recommended follow-up:** Update the stale documentation and rename or clarify
-the tests so they distinguish persistence/state-machine behavior from
+**Recommendation at audit time:** Update the stale documentation and rename or
+clarify the tests so they distinguish persistence/state-machine behavior from
 runtime-authorized provider execution. Preserve assertions that the current
 NO-GO blocks actual provider execution.
+
+**Current revalidation:** The misleading continuation claims were corrected in
+the Part 13 report, master plan, README, and Master PRD. The two originally
+cited test names now describe the NO-GO denial and single-use approval-state
+redemption rather than implying provider execution. Three additional
+route-test names that described unreachable provider/validator paths were also
+clarified. The original findings above record the audit-time state; this
+documentation/test-name issue is now closed. The focused approval integrity
+and persistence suites passed: 74 tests. `git diff --check` passed.
 
 ## Entry-point and bypass-path analysis
 
@@ -137,7 +179,7 @@ NO-GO blocks actual provider execution.
   remain internally callable; route-level guards are not a universal
   repository-level fence.
 
-## Verified behavior versus unverified behavior
+## Verified behavior versus unverified behavior at original audit time
 
 **Verified by source inspection:** the guard raises for known unfenced
 operations; reviewed authenticated/protected HTTP paths call it; production
@@ -147,18 +189,17 @@ because trusted authentication/account resolution and complete route
 authorization are not implemented; direct approved-chat service paths are
 guarded.
 
-**Not verified:** tests were not run; no live deployment or provider
-configuration was inspected; actual network reachability, provider activation,
-and exposure of `/api/chat` were not tested. Source inspection cannot establish
-deployment risk or prove that every possible embedding/caller is absent.
+**At original audit time, not verified:** tests had not been run; no live
+deployment or provider configuration had been inspected; actual network
+reachability, provider activation, and exposure of `/api/chat` had not been
+tested. The 2026-11-25 tests are offline and do not establish deployment
+configuration or network exposure.
 
-## Final assessment
+## Original audit final assessment (historical)
 
-Phase 3G.1 is fail-closed for the named operations when the guard is reached,
-but overall enforcement does **not** pass this audit: the anonymous chat path
-can reach configured provider/research dispatch without that gate, and direct
-ordinary service methods lack a mandatory authorization default. Keep all
-existing NO-GO gates unchanged and do not enable production authentication,
-providers, or protected execution. Address Finding 1 and add side-effect-order
-regressions before claiming the Local Demo and cross-store NO-GO boundaries
-cover all entry points.
+At the original audit, the anonymous path could reach provider/research
+dispatch. That finding is superseded for the reviewed current source paths by
+the revalidation above. Finding 2 remains a low-severity documentation/test-
+naming issue. Production exposure and all deployment assumptions remain
+unverified. Keep all existing NO-GO gates unchanged and do not enable
+production authentication, providers, or protected execution.

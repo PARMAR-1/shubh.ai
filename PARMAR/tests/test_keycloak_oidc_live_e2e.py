@@ -967,6 +967,9 @@ def test_real_keycloak_provider_error_consumes_state_without_session(
         "exchange_authorization_code",
         record_exchange,
     )
+    identity_before = _identity_store_snapshot(live_environment)
+    sessions_before = _session_store_snapshot(live_environment)
+    session_count_before = len(sessions_before)
     response = _callback_response(live_environment, flow, flow.callback_url)
     _assert_error_is_safe(
         live_environment,
@@ -974,7 +977,7 @@ def test_real_keycloak_provider_error_consumes_state_without_session(
         response,
         401,
         extra_sensitive=(provider_error,),
-        expected_session_count=sessions_before,
+        expected_session_count=session_count_before,
     )
     payload = _json_payload(response, "PARMAR returned an invalid provider-error response.")
     _check(
@@ -1013,6 +1016,7 @@ def test_real_keycloak_provider_error_consumes_state_without_session(
     )
     _check(
         not exchange_calls
+        and _state_transaction_count(live_environment, flow.state) == 0
         and _identity_store_snapshot(live_environment) == identity_before
         and _session_store_snapshot(live_environment) == sessions_before,
         "Replaying the provider error exchanged a code or changed identity/session records.",
